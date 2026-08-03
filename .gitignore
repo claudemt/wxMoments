@@ -1,0 +1,41 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+.env
+config/config.json
+config/*.local.json
+output/
+output_test/
+.runtime/
+var/
+runtime/
+*.log
+*.tmp
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.zip
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.whl
+!wheels/*.whl
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Cache
+.pytest_cache/
+.ruff_cache/

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "wxmoments"
+version = "0.1.0"
+description = "微信朋友圈导出工具 - 导出朋友圈到 Markdown/HTML/PDF"
+requires-python = ">=3.10"
+dependencies = [
+    "cryptography",
+    "httpx",
+    "pefile",
+    "pillow",
+    "pilk",
+    "psutil",
+    "pycryptodome",
+    "pymem; platform_system == 'Windows'",
+    "pywin32; platform_system == 'Windows'",
+    "reportlab",
+    "requests",
+    "yara-python; platform_system == 'Windows'",
+    "zstandard",
+]
+
+[project.scripts]
+wxmoments = "wxmoments:main"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501"]

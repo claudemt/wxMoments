@@ -96,6 +96,11 @@ def load_config(path: Path) -> dict[str, Any]:
     return data
 
 
+def save_config(path: Path, config: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def ensure_imports() -> None:
     if (SRC_ROOT / "wechat_decrypt_tool").exists():
         sys.path.insert(0, str(SRC_ROOT))
@@ -365,6 +370,63 @@ def find_account(config: dict[str, Any]) -> AccountInfo:
             r"C:\Users\你的用户名\Documents\WeChat Files 或 D:\微信文件。"
         )
     return max(candidates, key=lambda item: item[0])[1]
+
+
+def _normalize_pasted_path(value: str) -> Path:
+    raw = str(value or "").strip().strip('"').strip("'")
+    if raw.startswith("& "):
+        raw = raw[2:].strip().strip('"').strip("'")
+    raw = os.path.expandvars(raw)
+    path = Path(raw).expanduser()
+    if path.is_file() and path.name.lower() == "sns.db":
+        path = path.parent
+    return path
+
+
+def find_account_with_interactive_retry(
+    config: dict[str, Any],
+    config_path: Path,
+    original_error: FileNotFoundError,
+) -> AccountInfo:
+    print(f"\n{original_error}", flush=True)
+    print(
+        "\n自动定位失败，但可以现场补救：\n"
+        "1. 打开电脑版微信 → 设置 → 文件管理 → 打开文件夹。\n"
+        "2. 把打开的文件夹路径复制/拖入到这里。\n"
+        "3. 也可以直接粘贴包含 wxid_xxxxx 或 db_storage 的目录。\n"
+        "直接回车则退出。\n",
+        flush=True,
+    )
+
+    while True:
+        raw = input("请输入微信数据目录路径: ").strip()
+        if not raw:
+            raise original_error
+        candidate = _normalize_pasted_path(raw)
+        if not candidate.exists():
+            print(f"这个路径不存在：{candidate}", flush=True)
+            continue
+
+        trial_config = dict(config)
+        trial_config["wechat_data_root"] = str(candidate)
+        try:
+            account_info = find_account(trial_config)
+        except FileNotFoundError:
+            print(
+                "这个路径里仍然没有找到朋友圈数据库 sns.db。请尝试上一级目录、"
+                "WeChat Files / xwechat_files 目录，或直接搜索 sns.db 后粘贴其所在目录。",
+                flush=True,
+            )
+            continue
+
+        config["wechat_data_root"] = str(candidate)
+        save_config(config_path, config)
+        print(
+            f"已找到账号目录：{account_info.wxid_dir}\n"
+            f"已保存 wechat_data_root 到：{config_path}",
+            flush=True,
+        )
+        return account_info
 
 
 def is_wechat_running() -> bool:
@@ -1882,7 +1944,12 @@ async def _main_impl(args: argparse.Namespace) -> int:
     print_input_rules()
 
     progress("定位微信并获取密钥")
-    account_info = find_account(config)
+    try:
+        account_info = find_account(config)
+    except FileNotFoundError as exc:
+        if args.quiet:
+            raise
+        account_info = find_account_with_interactive_retry(config, Path(args.config), exc)
     key = acquire_db_key(account_info, config, args)
     if not re.fullmatch(rf"[0-9a-fA-F]{{{DB_KEY_HEX_LENGTH}}}", key):
         raise ValueError("数据库密钥必须是 64 位十六进制字符串")

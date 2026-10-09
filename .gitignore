@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+runtime/.venv/
+runtime/install.log
+runtime/wxmoments.log
+runtime/output/
+output/
+config/config.json

@@ -1,0 +1,17 @@
+﻿beautifulsoup4
+cryptography
+fastapi
+httpx
+lxml
+pefile
+pilk
+pillow
+psutil
+pycryptodome
+pymem; platform_system == "Windows"
+pywin32; platform_system == "Windows"
+reportlab
+requests
+uvicorn
+yara-python; platform_system == "Windows"
+zstandard

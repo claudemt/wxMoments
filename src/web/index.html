@@ -1,0 +1,217 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>微信数据导出工具</title>
+<link rel="stylesheet" href="/static/style.css?v=18">
+</head>
+<body>
+<div class="app">
+
+  
+
+  <div class="banner" id="banner" hidden></div>
+
+  
+
+  <div class="dl-banner" id="dl-banner" hidden>
+    <div class="dl-title" id="dl-title">下载中…</div>
+    <div class="dl-progress"><div id="dl-bar"></div></div>
+    <div class="dl-msg" id="dl-msg"></div>
+    <div class="dl-row">
+      <div class="dl-dir" id="dl-dir"></div>
+      <button class="dl-cancel" id="btn-dl-cancel" hidden>取消</button>
+    </div>
+  </div>
+
+  <header class="top">
+    <div class="brand">
+      <div class="brand-logo">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M9.3 5.2C5.4 5.2 2.3 7.8 2.3 11c0 1.9 1 3.5 2.6 4.6L4.2 18l2.5-1.2c.8.2 1.6.3 2.5.3.4 0 .9 0 1.3-.1-.4-1.9.2-3.9 1.7-5.3 1.4-1.4 3.4-2 5.3-1.7-.5-3.4-3.9-5.8-8.2-5.8Z" fill="#fff" opacity=".95"/>
+          <path d="M21.7 14.4c0-2.7-2.6-4.9-5.8-4.9-3.3 0-5.9 2.2-5.9 4.9s2.6 4.9 5.9 4.9c.7 0 1.4-.1 2-.4l1.8.9-.5-1.7c1.4-.8 2.5-2.1 2.5-3.7Z" fill="#fff" opacity=".75"/>
+        </svg>
+      </div>
+      <div>
+        <h1>微信数据导出工具</h1>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button class="ghost" id="btn-output">打开输出目录</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" id="tab-moments">朋友圈导出</button>
+    <button class="tab" id="tab-wechat">公众号导出</button>
+    <button class="tab" id="tab-contacts">好友列表导出</button>
+  </nav>
+
+  
+
+  <section class="panel" id="panel-moments">
+    <div class="moments-head">
+      <div>
+        <strong>朋友圈导出</strong>
+        <span class="muted" id="m-status"></span>
+      </div>
+      <button class="primary" id="m-init">初始化解密</button>
+    </div>
+
+    <div class="m-body" id="m-body" hidden>
+      <div class="m-tools">
+        <button class="ghost m-filter-btn" id="m-filter-btn">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M4 6h16M7 12h10M10 18h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          筛选<span class="m-filter-state" id="m-filter-state"></span>
+        </button>
+        <button class="ghost" id="m-select-all">全选</button>
+        <span class="muted" id="m-list-count"></span>
+      </div>
+      <div class="m-list-head">
+        <span class="muted">时间</span><span class="muted">作者</span><span class="muted">内容</span><span class="muted">媒体</span>
+      </div>
+      <div class="list" id="m-list" tabindex="-1"></div>
+      <div class="pager" id="m-pager"></div>
+
+      <div class="m-foot">
+        <button class="primary" id="m-export" disabled>下载选中（0 条）</button>
+      </div>
+    </div>
+  </section>
+
+  
+
+  <section class="panel" id="panel-wechat" hidden>
+
+    <div class="bar">
+      <input id="url" type="text" spellcheck="false" autocomplete="off"
+             placeholder="粘贴公众号文章链接，例如 https://mp.weixin.qq.com/s/xxxxx">
+      <button class="primary" id="btn-parse">解析</button>
+    </div>
+
+    <section class="article" id="article" hidden>
+      <div class="art-main">
+        <h2 id="art-title"></h2>
+        <div class="art-meta" id="art-meta"></div>
+      </div>
+      <div class="art-buttons">
+        <button class="primary" id="btn-export">下载</button>
+        <button id="btn-author">关于作者</button>
+      </div>
+    </section>
+
+    <section class="author" id="author" hidden>
+      <div class="author-head">
+        <div>
+          <strong id="author-name"></strong>
+          <span class="muted" id="author-count"></span>
+        </div>
+        <div class="author-tools">
+          <button class="ghost" id="btn-select-all">全选</button>
+          <button class="primary" id="btn-download-picked" disabled>下载选中</button>
+          <button id="btn-download-all">下载全部</button>
+        </div>
+      </div>
+
+      <div class="open-panel" id="open-panel" hidden>
+        <div class="open-title">目前识别到的只是你曾经点开过的文章，不是该作者的全部文章</div>
+        <ol class="open-steps">
+          <li>你需要把每一篇文章都<b>点开一遍</b>（点开即可，可以立刻按 <b>Ctrl+W</b> 关掉），才能获得作者的完整文章列表</li>
+          <li>下面的收录列表会实时更新，点完直接勾选下载</li>
+        </ol>
+        <div class="open-status" id="open-status"></div>
+      </div>
+
+      <div class="list-head">
+        <span class="muted">标题</span>
+        <span class="muted">时间</span>
+        <span></span>
+      </div>
+      <div class="list" id="list" tabindex="-1"></div>
+      <div class="pager" id="list-pager"></div>
+    </section>
+
+  </section>
+
+  
+
+  <section class="panel" id="panel-contacts" hidden>
+    <div class="moments-head">
+      <div>
+        <strong>好友列表导出</strong>
+        <span class="muted" id="c-status"></span>
+      </div>
+      <div class="art-buttons">
+        <button class="ghost" id="c-init">初始化解密</button>
+        <button class="primary" id="c-export" disabled>导出</button>
+      </div>
+    </div>
+
+    <div class="m-body" id="c-body" hidden>
+      <div class="c-cols" id="c-cols"></div>
+
+      <div class="c-bar">
+        <input id="c-search" type="text" spellcheck="false"
+               placeholder="搜索好友（备注 / 昵称 / 微信号 / wxid）">
+        <span class="muted" id="c-count"></span>
+      </div>
+
+      <div class="c-table-wrap">
+        <table class="c-table" id="c-table">
+          <thead id="c-thead"></thead>
+          <tbody id="c-tbody"></tbody>
+        </table>
+      </div>
+      <div class="pager" id="c-pager"></div>
+    </div>
+  </section>
+
+  
+
+  <div class="overlay" id="m-filter-overlay" hidden>
+    <div class="filter-modal">
+      <div class="fm-head">
+        <strong>筛选朋友圈</strong>
+        <button class="fm-close" id="fm-close" title="关闭">✕</button>
+      </div>
+
+      <div class="fm-dates">
+        <label>开始 <input type="date" id="m-start"></label>
+        <label>结束 <input type="date" id="m-end"></label>
+        <label class="m-check"><input type="checkbox" id="m-keep"> 保留点赞评论</label>
+      </div>
+
+      <div class="m-friends-head">
+        <input id="m-friend-search" type="text" spellcheck="false"
+               placeholder="搜索好友（默认全选，取消勾选即可只看其余人）">
+        <span class="muted" id="m-friend-count"></span>
+        <button id="m-friend-all">全选</button>
+        <button id="m-friend-clear">清空</button>
+      </div>
+      <div class="m-friend-list" id="m-friend-list"></div>
+
+      <div class="fm-foot">
+        <span class="muted fm-hint">改动立即生效，关闭后列表已按当前筛选显示</span>
+        <button class="ghost" id="fm-cancel">取消</button>
+        <button class="primary" id="fm-apply">完成</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="pd-overlay" hidden>
+    <div class="pd-modal">
+      <div class="fm-head">
+        <strong>朋友圈详情</strong>
+        <button class="fm-close" id="pd-close" title="关闭">✕</button>
+      </div>
+      <div class="pd-body" id="pd-body"></div>
+    </div>
+  </div>
+
+</div>
+<script src="/static/app.js?v=25"></script>
+</body>
+</html>

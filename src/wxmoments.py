@@ -20,14 +20,17 @@ from typing import Any
 
 from wechat_decrypt_tool.modules.constants import (
     MEDIA_TYPE_IMAGE, MEDIA_TYPE_VIDEO, MEDIA_TYPE_LIVE_PHOTO,
-    POST_TYPE_NORMAL, POST_TYPE_ARTICLE, POST_TYPE_LINK, POST_TYPE_COVER,
-    POST_TYPE_FINDER, POST_TYPE_MUSIC,
-    DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
+    POST_TYPE_NORMAL, POST_TYPE_COVER,
+    DEFAULT_PAGE_LIMIT,
     DB_KEY_HEX_LENGTH,
     IMAGE_AES_KEY_LENGTH, IMAGE_XOR_KEY_MAX,
     PDF_FONT_NAME, PDF_FONT_FALLBACK, PDF_DPI,
     PDF_MARGIN_LEFT, PDF_MARGIN_RIGHT, PDF_MARGIN_TOP, PDF_MARGIN_BOTTOM,
 )
+from wechat_decrypt_tool.modules.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 from wechat_decrypt_tool.modules.wechat_emoji import emojify_wechat_shortcodes
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -184,7 +187,7 @@ def default_wechat_roots() -> list[Path]:
 
         roots.extend(Path(item).expanduser() for item in auto_detect_wechat_data_dirs())
     except Exception as exc:
-        print(f"[warning] {exc}", file=sys.stderr)
+        logger.warning("%s", exc)
 
     for raw in (
         Path.home() / "Documents" / "xwechat_files",
@@ -310,7 +313,7 @@ def iter_account_candidates(root: Path, account_hint: str = "") -> list[AccountI
     try:
         roots.extend([p for p in root.iterdir() if p.is_dir() and p.name.lower().startswith("wxid_")])
     except Exception as exc:
-        print(f"[warning] {exc}", file=sys.stderr)
+        logger.warning("%s", exc)
     for wxid_dir in roots:
         db_dir = wxid_dir / "db_storage"
         sns = db_dir / "sns" / "sns.db"
@@ -451,7 +454,7 @@ def load_saved_db_key(account_info: AccountInfo) -> str:
     try:
         data = json.loads(key_store.read_text(encoding="utf-8"))
     except Exception as exc:
-        print(f"[warning] {exc}", file=sys.stderr)
+        logger.warning("%s", exc)
         return ""
     if not isinstance(data, dict):
         return ""
@@ -520,21 +523,39 @@ async def save_image_keys(account: str, wxid_dir: Path, db_storage_dir: Path) ->
 def decrypt_databases(account_info: AccountInfo, key: str) -> Path:
     from wechat_decrypt_tool.modules.wechat_decrypt import decrypt_wechat_databases
 
-    result = decrypt_wechat_databases(db_storage_path=str(account_info.db_storage_dir), key=key)
+    required = {"sns.db", "contact.db"}
+    result = decrypt_wechat_databases(
+        db_storage_path=str(account_info.db_storage_dir), key=key, database_names=required)
     if str(result.get("status") or "").lower() not in {"success", "ok"}:
         raise RuntimeError(str(result.get("message") or "数据库解密失败"))
     account_results = result.get("account_results") if isinstance(result.get("account_results"), dict) else {}
     for account_name, detail in account_results.items():
-        if account_info.account.lower() == str(account_name or "").lower() and isinstance(detail, dict):
+        if not isinstance(detail, dict):
+            continue
+        source = detail.get("source_db_storage_path")
+        same_account = (
+            os.path.normcase(str(Path(source).resolve()))
+            == os.path.normcase(str(account_info.db_storage_dir.resolve()))
+        ) if source else account_info.account.casefold() == str(account_name or "").casefold()
+        if same_account:
             out = Path(str(detail.get("output_dir") or ""))
-            if (out / "sns.db").exists():
-                return out
-    fallback = OUTPUT_RUNTIME_DIR / "databases" / account_info.account
-    if (fallback / "sns.db").exists():
-        return fallback
-    for candidate in (OUTPUT_RUNTIME_DIR / "databases").glob("*/sns.db"):
-        return candidate.parent
-    raise FileNotFoundError("解密完成后没有找到 sns.db")
+            # Require outputs from this attempt, not stale files from an earlier run.
+            processed = {Path(path).name.casefold() for path in detail.get("processed_files") or []}
+            missing = required - processed
+            if missing or not all((out / name).is_file() for name in required):
+                raise RuntimeError("联系人或朋友圈数据读取失败，请确认微信已登录后点击「刷新」。")
+            db_diagnostics = detail.get("db_diagnostics") or {}
+            fallback_labels = []
+            for name, label in (("contact.db", "联系人"), ("sns.db", "朋友圈")):
+                wal = (db_diagnostics.get(name) or {}).get("wal_merge") or {}
+                if wal.get("quick_check_ok") is False and not wal.get("applied"):
+                    fallback_labels.append(label)
+            if fallback_labels:
+                notice = (f"{'、'.join(fallback_labels)}的最新改动暂时无法读取，已使用通过校验的本地数据。"
+                          "最近的新增或修改可能未包含；请稍后点击「刷新」。")
+                logger.warning(notice)
+            return out
+    raise RuntimeError("没有读取到当前微信账号的联系人和朋友圈数据，请点击「刷新」。")
 
 
 def image_size(payload: bytes, media_type: str) -> tuple[int, int]:
@@ -726,7 +747,27 @@ def load_timeline(account_dir: Path, usernames: list[str] | None = None, *, sour
         if not response.get("hasMore") or not page:
             break
         offset += len(page)
-    return posts
+
+    # 微信实时读取可能返回同一 tid 的多行（原始库重复/分页重叠），按 tid 去重。
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for item in posts:
+        tid = item.get("tid")
+        if tid is None:
+            tid = item.get("id")
+        if tid is not None:
+            key = str(tid)
+        else:
+            key = "|".join([
+                str(item.get("username") or ""),
+                str(item.get("createTime") or ""),
+                str(item.get("contentDesc") or ""),
+            ])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
 
 
 def post_created_datetime(post: dict[str, Any]) -> datetime | None:
@@ -736,7 +777,10 @@ def post_created_datetime(post: dict[str, Any]) -> datetime | None:
         return None
     if created_ts <= 0:
         return None
-    return datetime.fromtimestamp(created_ts)
+    try:
+        return datetime.fromtimestamp(created_ts)
+    except (ValueError, OverflowError, OSError):
+        return None
 
 
 def build_coverage_report(
@@ -744,6 +788,8 @@ def build_coverage_report(
     filtered: list[dict[str, Any]],
     start: datetime | None,
     end: datetime | None,
+    *,
+    reference_time: datetime | None = None,
 ) -> dict[str, Any]:
     dated = sorted(dt for post in posts if (dt := post_created_datetime(post)) is not None)
     filtered_dated = sorted(dt for post in filtered if (dt := post_created_datetime(post)) is not None)
@@ -768,7 +814,7 @@ def build_coverage_report(
         "export_latest": filtered_dated[-1].strftime("%Y-%m-%d %H:%M:%S") if filtered_dated else "",
         "requested_start": start.strftime("%Y-%m-%d %H:%M:%S") if start else "",
         "requested_end": end.strftime("%Y-%m-%d %H:%M:%S") if end else "",
-        "large_gaps": gaps[:20],
+        "large_gaps": gaps,
         "large_gap_threshold_days": 21,
     }
     warnings: list[str] = []
@@ -780,11 +826,24 @@ def build_coverage_report(
         warnings.append(
             f"请求结束时间晚于本地缓存最新记录：{end:%Y-%m-%d %H:%M:%S} > {dated[-1]:%Y-%m-%d %H:%M:%S}"
         )
+    if not dated:
+        warnings.append("本地没有可识别时间的朋友圈记录，请在微信中浏览朋友圈后点击「刷新」。")
+    stale_days = 0
+    if dated and end is None:
+        stale_days = max(0, ((reference_time or datetime.now()).date() - dated[-1].date()).days - 1)
+        if stale_days >= 21:
+            warnings.append(
+                f"最新本地记录停留在 {dated[-1]:%Y-%m-%d}，此后已有 {stale_days} 个完整日没有记录，近期朋友圈可能尚未同步。"
+            )
     if gaps:
         largest = gaps[0]
         warnings.append(
-            f"本地缓存存在明显断档：{largest['from']} 至 {largest['to']} 之间约 {largest['gap_days']} 天没有记录"
+            f"本地朋友圈记录疑似缺失：{largest['from']} 至 {largest['to']} 之间约 {largest['gap_days']} 天没有记录"
         )
+    if warnings and dated:
+        warnings.append("以上仅反映本机缓存，不能据此确认好友未发布；请在微信中浏览对应时段后点击「刷新」。")
+    report["large_gap_count"] = len(gaps)
+    report["local_stale_days"] = stale_days
     report["warnings"] = warnings
     return report
 
@@ -794,9 +853,9 @@ def write_coverage_report(output: Path, report: dict[str, Any]) -> None:
     earliest = str(report.get("local_earliest") or "")
     latest = str(report.get("local_latest") or "")
     if earliest or latest:
-        print(f"  本地缓存范围: {earliest or '未知'} ~ {latest or '未知'}", flush=True)
+        logger.info("本地缓存范围: %s ~ %s", earliest or "未知", latest or "未知")
     for warning in report.get("warnings") or []:
-        print(f"  [coverage] {warning}", flush=True)
+        logger.warning("%s", warning)
 
 
 def save_db_key(account_info: AccountInfo, account_dir: Path, key: str) -> None:
@@ -812,7 +871,7 @@ def save_db_key(account_info: AccountInfo, account_dir: Path, key: str) -> None:
             db_key_source_db_storage_path=str(account_info.db_storage_dir),
         )
     except Exception as exc:
-        print(f"[warning] {exc}", file=sys.stderr)
+        logger.warning("%s", exc)
 
 
 _SELF_SUFFIX_RE = re.compile(r"^(wxid_[^_]+)_[0-9a-zA-Z]{1,8}$")
@@ -1486,7 +1545,7 @@ def read_local_image(account_info: AccountInfo, account_dir: Path, post: dict[st
     try:
         payload, media_type = _read_and_maybe_decrypt_media(Path(local), account_dir)
     except Exception as exc:
-        print(f"[warning] {exc}", file=sys.stderr)
+        logger.warning("%s", exc)
         return b"", "", ""
     mt = str(media_type or "").split(";", 1)[0].strip() or _detect_image_media_type(payload[:32])
     if not payload or not mt.startswith("image/"):
@@ -1663,6 +1722,7 @@ async def export_markdown(
     allow_download: bool,
     progress_cb: Any = None,
     posts_override: list[dict[str, Any]] | None = None,
+    coverage_posts: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[ExportedPost]]:
     figure = output / "figure"
     figure.mkdir(parents=True, exist_ok=True)
@@ -1688,7 +1748,8 @@ async def export_markdown(
         )
     interaction_contact_names = dict(contact_names)
     interaction_contact_names.update(build_self_display_lookup(account_info, config, filtered, contact_names))
-    coverage = build_coverage_report(posts, filtered, start, end)
+    coverage = build_coverage_report(coverage_posts if coverage_posts is not None else posts,
+                                     filtered, start, end)
     write_coverage_report(output, coverage)
 
     lines = ["# 微信朋友圈备份", ""]
@@ -1732,7 +1793,7 @@ async def export_markdown(
             try:
                 media_type = int(media.get("type") or 0)
             except Exception as exc:
-                print(f"[warning] {exc}", file=sys.stderr)
+                logger.warning("%s", exc)
                 media_type = 0
             if media_type != MEDIA_TYPE_IMAGE:
                 continue
@@ -1778,7 +1839,8 @@ async def export_markdown(
                 interactions=interactions,
             )
         )
-        print(f"  ({idx}/{total}) {time_text} {display}", flush=True)
+        if not progress_cb:
+            logger.info("(%s/%s) %s %s", idx, total, time_text, display)
         if progress_cb:
             progress_cb(idx, total, display, time_text)
     (output / "moments.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
@@ -1853,7 +1915,7 @@ def optimized_pdf_image_uri(output: Path, rel: str, max_side: int = 640, quality
             image.save(target, format="JPEG", quality=quality, optimize=True, progressive=True)
         return target.resolve().as_uri()
     except Exception as exc:
-        print(f"[warning] PDF 图片压缩失败，使用原图: {source} ({exc})", file=sys.stderr)
+        logger.warning("PDF 图片压缩失败，使用原图: %s (%s)", source, exc)
         return source.resolve().as_uri()
 
 
@@ -1960,8 +2022,7 @@ def render_pdf_direct(output: Path, posts: list[ExportedPost], pdf_path: Path) -
         pdfmetrics.registerFont(UnicodeCIDFont(font_name))
     except Exception:
         font_name = PDF_FONT_FALLBACK
-        print("警告: PDF 中文字体 STSong-Light 不可用，中文可能显示为方块。"
-              "安装 Adobe Acrobat 或配置中文字体可解决此问题。")
+        logger.warning("PDF 中文字体 STSong-Light 不可用，中文可能显示为方块。安装中文字体可解决此问题。")
 
     image_dpi = PDF_DPI
 
@@ -2056,7 +2117,7 @@ def render_pdf_direct(output: Path, posts: list[ExportedPost], pdf_path: Path) -
                 buffer.seek(0)
                 return ImageReader(buffer), draw_width, draw_height
         except Exception as exc:
-            print(f"[warning] {exc}", file=sys.stderr)
+            logger.warning("%s", exc)
             return None
 
     def draw_single_image(path: Path) -> None:
@@ -2190,7 +2251,7 @@ def render_pdf(output: Path, posts: list[ExportedPost], pdf_path: Path) -> None:
                 shutil.rmtree(output / "_pdf_assets")
             return
         except Exception as exc:
-            print(f"[warning] 浏览器 PDF 生成失败，回退到直接渲染: {exc}", file=sys.stderr)
+            logger.warning("浏览器 PDF 生成失败，回退到直接渲染: %s", exc)
             with contextlib.suppress(OSError):
                 html_path.unlink()
             with contextlib.suppress(OSError):

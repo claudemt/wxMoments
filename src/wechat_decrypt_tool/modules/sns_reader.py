@@ -8,7 +8,6 @@ import json
 import re
 import html
 import sqlite3
-import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -87,7 +86,7 @@ def _sns_timeline_auto_cache_get(key: tuple[str, tuple[str, ...], str]) -> Optio
             try:
                 del _SNS_TIMELINE_AUTO_CACHE[key]
             except Exception as exc:
-                print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+                logger.warning("%s: %s", type(exc).__name__, exc)
             return None
         return bool(val)
 
@@ -172,7 +171,7 @@ def _count_sns_timeline_rows_in_decrypted_sqlite(
             try:
                 conn.close()
             except Exception as exc:
-                print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+                logger.warning("%s: %s", type(exc).__name__, exc)
     except Exception:
         return 0
 
@@ -221,7 +220,7 @@ def _count_sns_timeline_posts_in_decrypted_sqlite(
             try:
                 conn.close()
             except Exception as exc:
-                print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+                logger.warning("%s: %s", type(exc).__name__, exc)
     except Exception:
         return 0
 
@@ -261,7 +260,7 @@ def _write_sns_realtime_sync_state(account_dir: Path, data: dict[str, Any]) -> N
     try:
         p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:
-        print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+        logger.warning("%s: %s", type(exc).__name__, exc)
 
 
 def _ensure_decrypted_sns_db(account_dir: Path) -> Path:
@@ -290,7 +289,7 @@ def _ensure_decrypted_sns_db(account_dir: Path) -> Path:
         try:
             conn.close()
         except Exception as exc:
-            print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+            logger.warning("%s: %s", type(exc).__name__, exc)
 
     return sns_db_path
 
@@ -351,13 +350,13 @@ def _upsert_sns_timeline_rows_to_decrypted_db(
             try:
                 conn.rollback()
             except Exception as exc:
-                print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+                logger.warning("%s: %s", type(exc).__name__, exc)
             return 0
         finally:
             try:
                 conn.close()
             except Exception as exc:
-                print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+                logger.warning("%s: %s", type(exc).__name__, exc)
 
 def _extract_mp_biz_from_url(url: str) -> str:
     u = html.unescape(str(url or "")).replace("&amp;", "&").strip()
@@ -489,11 +488,11 @@ def _decode_sns_text_blob(value: Any) -> str:
             try:
                 raw = zstd.decompress(raw)
             except Exception as exc:
-                print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+                logger.warning("%s: %s", type(exc).__name__, exc)
         try:
             s = raw.decode("utf-8", errors="ignore")
         except Exception as exc:
-            print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+            logger.warning("%s: %s", type(exc).__name__, exc)
             s = ""
         s = html.unescape(str(s or "").strip())
         return s if _looks_like_xml_text(s) else (str(s or "").strip())
@@ -504,11 +503,11 @@ def _decode_sns_text_blob(value: Any) -> str:
             try:
                 raw = zstd.decompress(raw)
             except Exception as exc:
-                print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+                logger.warning("%s: %s", type(exc).__name__, exc)
         try:
             s = raw.decode("utf-8", errors="ignore")
         except Exception as exc:
-            print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+            logger.warning("%s: %s", type(exc).__name__, exc)
             s = ""
         s = html.unescape(str(s or "").strip())
         return s if _looks_like_xml_text(s) else (str(s or "").strip())
@@ -543,7 +542,7 @@ def _decode_sns_text_blob(value: Any) -> str:
                 if s2:
                     return s2
         except Exception as exc:
-            print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+            logger.warning("%s: %s", type(exc).__name__, exc)
 
     if len(text) >= 24 and len(text) % 4 == 0 and re.fullmatch(r"[A-Za-z0-9+/=]+", text):
         try:
@@ -558,7 +557,7 @@ def _decode_sns_text_blob(value: Any) -> str:
                 if s2:
                     return s2
         except Exception as exc:
-            print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+            logger.warning("%s: %s", type(exc).__name__, exc)
 
     return text
 
@@ -659,7 +658,7 @@ def _parse_timeline_xml(xml_text: str, fallback_username: str) -> dict[str, Any]
             if out["sourceName"]:
                 break
     except Exception as exc:
-        print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+        logger.warning("%s: %s", type(exc).__name__, exc)
 
     def _find_text(*paths: str) -> str:
         for p in paths:
@@ -764,7 +763,7 @@ def _parse_timeline_xml(xml_text: str, fallback_username: str) -> dict[str, Any]
                 "size": size,
             })
     except Exception as exc:
-        print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+        logger.warning("%s: %s", type(exc).__name__, exc)
     out["media"] = media
 
     if post_type in (POST_TYPE_LINK, POST_TYPE_MUSIC):
@@ -915,7 +914,7 @@ def _parse_timeline_xml(xml_text: str, fallback_username: str) -> dict[str, Any]
             seen_like_users.add(key)
             likes.append({"username": username, "nickname": nickname})
     except Exception as exc:
-        print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+        logger.warning("%s: %s", type(exc).__name__, exc)
         likes = []
     out["likes"] = likes
 
@@ -938,7 +937,7 @@ def _parse_timeline_xml(xml_text: str, fallback_username: str) -> dict[str, Any]
                 }
             )
     except Exception as exc:
-        print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+        logger.warning("%s: %s", type(exc).__name__, exc)
         comments = []
     out["comments"] = comments
 
@@ -1756,7 +1755,7 @@ def _query_wcdb_realtime_timeline(
                 auto_cache_key = _sns_timeline_auto_cache_key(account_dir, users, kw)
                 _sns_timeline_auto_cache_set(auto_cache_key, True)
             except Exception as exc:
-                print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+                logger.warning("%s: %s", type(exc).__name__, exc)
             out = _query_decrypted_sqlite(
                 account_dir, contact_db_path, users, kw, limit, offset,
                 cover_data, covers_data,
@@ -1809,7 +1808,7 @@ def _query_wcdb_realtime_timeline(
                         pack = rr.get("pack_info_buf")
                         writeback_rows.append((tid_val, uname1, content_xml, None if pack is None else str(pack)))
         except Exception as exc:
-            print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+            logger.warning("%s: %s", type(exc).__name__, exc)
             content_by_tid = {}
             writeback_rows = []
 
@@ -1928,7 +1927,7 @@ def _query_wcdb_realtime_timeline(
                                 if not str(lp.get("key") or "").strip():
                                     lp["key"] = video_key_xml
         except Exception as exc:
-            print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+            logger.warning("%s: %s", type(exc).__name__, exc)
 
         official = {}
         if post_type == POST_TYPE_ARTICLE:
@@ -2031,7 +2030,7 @@ def _query_wcdb_realtime_timeline(
                 out["source"] = "sqlite-auto"
                 return out
         except Exception as exc:
-            print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+            logger.warning("%s: %s", type(exc).__name__, exc)
 
     return wcdb_resp
 
@@ -2098,7 +2097,7 @@ def list_sns_timeline(
                 out["source"] = "sqlite-auto"
                 return out
         except Exception as exc:
-            print(f"[warning] {type(exc).__name__}: {exc}", file=sys.stderr)
+            logger.warning("%s: %s", type(exc).__name__, exc)
 
     try:
         return _query_wcdb_realtime_timeline(

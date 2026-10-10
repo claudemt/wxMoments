@@ -1167,7 +1167,8 @@ class WeChatDatabaseDecryptor:
             logger.error(f"解密失败: {db_path}, 错误: {e}")
             return _finalize(False, str(e))
 
-def decrypt_wechat_databases(db_storage_path: str = None, key: str = None) -> dict:
+def decrypt_wechat_databases(db_storage_path: str = None, key: str = None,
+                            *, database_names: set[str] | None = None) -> dict:
     from .logging_config import get_logger
 
     logger = get_logger(__name__)
@@ -1239,6 +1240,13 @@ def decrypt_wechat_databases(db_storage_path: str = None, key: str = None) -> di
             "output_directory": str(base_output_dir.absolute()),
             "processed_files": [],
             "failed_files": []
+        }
+
+    if database_names is not None:
+        wanted = {name.casefold() for name in database_names}
+        account_databases = {
+            account: [db for db in databases if str(db["name"]).casefold() in wanted]
+            for account, databases in account_databases.items()
         }
 
     total_databases = sum(len(dbs) for dbs in account_databases.values())

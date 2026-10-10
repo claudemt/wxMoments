@@ -2,27 +2,44 @@
 
 const $ = (id) => document.getElementById(id);
 
+function notify(message, level = "error") {
+  return floating.message(String(message || "操作失败，请重试"), level);
+}
+const enqueueBanner = (message) => notify(message, "success");
 
+window.addEventListener("unhandledrejection", (event) => {
+  event.preventDefault();
+  if (!event.reason?.reported) notify(event.reason?.message || "操作失败，请重试");
+});
+window.addEventListener("error", (event) => notify(event.message || "页面发生错误，请刷新重试"));
 
 async function api(path, body, silent = false) {
-  let r;
   try {
-    r = await fetch(path, {
+    const response = await fetch(path, {
       method: body === undefined ? "GET" : "POST",
       headers: { "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(60000),
     });
-  } catch (e) {
-    if (!silent) {
-      alert("连不上本地服务（它可能已退出）。请重新双击 run.bat 启动后刷新页面。");
+    const result = await response.json().catch(() => ({
+      ok: false, msg: `服务错误（${response.status}），请重试。`,
+    }));
+    if (!response.ok || result.ok === false) {
+      if (!silent) notify(result.msg || `服务返回错误（${response.status}）`);
+      if (!response.ok) {
+        const error = new Error(result.msg || `HTTP ${response.status}`);
+        error.reported = !silent;
+        throw error;
+      }
     }
-    throw e;
+    return result;
+  } catch (error) {
+    if (!silent && !error.reported) {
+      notify("连不上本地服务，请重新启动 run.bat 后刷新。");
+      error.reported = true;
+    }
+    throw error;
   }
-  if (!r.ok) {
-    if (!silent) alert(`服务返回错误（${r.status}），请刷新后重试。`);
-    throw new Error(`HTTP ${r.status}`);
-  }
-  return r.json();
 }
 
 function show(el, on = true) { el.hidden = !on; }
@@ -31,8 +48,6 @@ function escapeHtml(s) {
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
-
-
 
 function renderPager(container, total, size, page, onPage) {
   container.innerHTML = "";
@@ -51,118 +66,176 @@ function renderPager(container, total, size, page, onPage) {
   btn("下一页 ›", page >= pages - 1, () => onPage(page + 1));
 }
 
+const task = { jobs: new Map(), poll: null, polling: false };
+let diagnosticsCursor = null;
+let serviceOffline = false;
 
-
-const bannerQueue = [];
-let bannerShowing = false;
-
-function enqueueBanner(text) {
-  bannerQueue.push(text);
-  if (!bannerShowing) showNextBanner();
+async function pollDiagnostics() {
+  try {
+    const res = await api(`/api/diagnostics?after=${diagnosticsCursor ?? 0}`, undefined, true);
+    const firstPoll = diagnosticsCursor === null;
+    diagnosticsCursor = res.cursor;
+    serviceOffline = false;
+    for (const event of firstPoll ? [] : res.events || []) {
+      if (event.notice && ["ERROR", "CRITICAL"].includes(event.level)) {
+        notify(event.notice, "error");
+      }
+    }
+  } catch (error) {
+    if (!serviceOffline) notify("服务连接中断，请重新启动后刷新页面。");
+    serviceOffline = true;
+  }
+  setTimeout(pollDiagnostics, 4000);
 }
 
-function showNextBanner() {
-  if (!bannerQueue.length) { bannerShowing = false; return; }
-  bannerShowing = true;
-  const el = $("banner");
-  const text = bannerQueue.shift();
-  el.textContent = text;
-  el.hidden = false;
-  el.classList.remove("hide", "show");
-  
-  el.classList.toggle("below", !$("dl-banner").hidden);
-  void el.offsetWidth;               
-  el.classList.add("show");
-  clearTimeout(el._t);
-  el._t = setTimeout(() => {
-    el.classList.add("hide");
-    setTimeout(() => {
-      el.hidden = true;
-      showNextBanner();
-    }, 420);
-  }, 2600);
+function startJob(jobId, title, dir, onComplete = null, kind = "export") {
+  if (task.jobs.has(jobId)) return;
+  task.jobs.set(jobId, { id: jobId, title, dir, onComplete, kind, completed: false,
+    snapshot: { status: "running", done: 0, total: 0, message: "准备中…", log: [] } });
+  renderJob(task.jobs.get(jobId));
+  if (!task.polling) pollJob();
 }
 
-
-
-const task = { job: null, poll: null, title: "" };
-
-function startJob(jobId, title, dir) {
-  task.job = jobId;
-  task.title = title;
-  stopJobPoll();
-  task.poll = setInterval(pollJob, 900);
-  pollJob();
-  
-  const dl = $("dl-banner");
-  $("dl-title").textContent = `下载中：${title}（0%）`;
-  $("dl-msg").textContent = "";
-  $("dl-dir").textContent = dir ? `下载目录：${dir}` : "";
-  $("dl-bar").style.width = "0%";
-  show($("btn-dl-cancel"), true);
-  dl.hidden = false;
-}
-
-function stopJobPoll() {
-  if (task.poll) { clearInterval(task.poll); task.poll = null; }
+function renderJob(item) {
+  const job = item.snapshot;
+  if (item.kind === "init" && item.completed && job.status === "done") {
+    floating.close(`job:${item.id}`);
+    return;
+  }
+  const pct = job.total ? Math.min(100, Math.round(job.done / job.total * 100)) : 0;
+  const level = job.status === "running" ? "info" : job.status === "error" ? "error" : job.status === "done" ? "success" : "info";
+  const title = `${item.title} · ${job.status === "running" ? `处理中 ${pct}%` : job.status === "done" ? "已完成" : job.status === "canceled" ? "已取消" : "失败"}`;
+  const popup = floating.open(`job:${item.id}`, title, level);
+  popup.onClose = () => task.jobs.delete(item.id);
+  if (!item.view) {
+    const progress = document.createElement("div");
+    progress.className = "dl-progress";
+    const bar = document.createElement("div");
+    progress.append(bar);
+    const message = document.createElement("div");
+    message.className = "dl-msg";
+    const row = document.createElement("div");
+    row.className = "dl-row";
+    const directory = document.createElement("div");
+    directory.className = "dl-dir";
+    const cancel = document.createElement("button");
+    cancel.className = "dl-cancel";
+    cancel.textContent = "取消";
+    cancel.onclick = async () => {
+      cancel.disabled = true;
+      try {
+        const res = await api(`/api/job/${item.id}/cancel`, {});
+        if (res.ok) cancel.textContent = "正在取消…";
+        else cancel.disabled = false;
+      } catch (error) { cancel.disabled = false; }
+    };
+    row.append(directory, cancel);
+    const details = document.createElement("details");
+    details.className = "task-details";
+    const summary = document.createElement("summary");
+    summary.textContent = "任务日志";
+    const log = document.createElement("pre");
+    details.append(summary, log);
+    popup.body.append(progress, message, row, details);
+    item.view = { bar, message, directory, cancel, log };
+  }
+  const view = item.view;
+  view.bar.style.width = `${job.status === "done" ? 100 : pct}%`;
+  view.message.textContent = job.message;
+  view.directory.textContent = item.dir ? `保存目录：${item.dir}` : "";
+  view.log.textContent = (job.log || []).join("\n") || "暂无日志";
+  show(view.cancel, job.status === "running" && item.kind !== "init");
+  if (item.completed && !item.closing) {
+    item.closing = true;
+    floating.finish(popup, job.status === "error" ? 6000 : 4000);
+  }
 }
 
 async function pollJob() {
-  if (!task.job) return;
-  let res;
+  task.polling = true;
+  clearTimeout(task.poll);
   try {
-    res = await api(`/api/job/${task.job}`, undefined, true);
-  } catch (e) {
-    return;
-  }
-  if (!res.ok) return;
-  const job = res.job;
-  const pct = job.total ? Math.round((job.done / job.total) * 100) : 0;
-  if (job.status === "running") {
-    
-    $("dl-title").textContent = `下载中：${task.title}（${pct}%）`;
-    const cur = job.message || "";
-    $("dl-msg").textContent = cur.startsWith("(") ? `正在处理 ${cur}` : cur;
-    $("dl-bar").style.width = `${pct}%`;
-  } else {
-    clearInterval(task.poll);
-    task.poll = null;
-    show($("btn-dl-cancel"), false);
-    
-    const dl = $("dl-banner");
-    $("dl-title").textContent = job.status === "done"
-      ? `下载完成：${job.message}`
-      : job.message;
-    $("dl-msg").textContent = "";
-    $("dl-bar").style.width = "100%";
-    clearTimeout(dl._t);
-    dl._t = setTimeout(() => { dl.hidden = true; }, 4000);
+    for (const item of [...task.jobs.values()]) {
+      if (item.completed) continue;
+      try {
+        const res = await api(`/api/job/${item.id}`, undefined, true);
+        if (!res.ok) continue;
+        item.snapshot = res.job;
+        const job = res.job;
+        if (job.results?.[0]?.dir) item.dir = job.results[0].dir;
+        if (job.status !== "running") item.completed = true;
+        renderJob(item);
+        if (item.completed && item.onComplete) await item.onComplete(job);
+      } catch (error) {
+        if (error.message.includes("任务不存在")) {
+          item.completed = true;
+          item.snapshot = { status: "error", message: "任务已失效，请重新操作。", log: [] };
+          renderJob(item);
+          if (item.onComplete) await item.onComplete(item.snapshot);
+        }
+      }
+    }
+  } finally {
+    task.polling = false;
+    if ([...task.jobs.values()].some((item) => !item.completed)) {
+      task.poll = setTimeout(pollJob, 900);
+    }
   }
 }
 
-$("btn-dl-cancel").onclick = async () => {
-  if (task.job) await api(`/api/job/${task.job}/cancel`, {});
+$("btn-output").onclick = () => api("/api/reveal", { path: "" });
+
+let supportFocus = null;
+function openSupport(kind) {
+  supportFocus = document.activeElement;
+  floating.close("coverage");
+  $("support-title").textContent = kind === "help" ? "帮助" : "查看日志";
+  show($("help-body"), kind === "help");
+  show($("logs-body"), kind === "logs");
+  show($("support-overlay"));
+  $("support-close").focus();
+  if (kind === "logs") loadLogs();
+}
+function closeSupport() {
+  if ($("support-overlay").hidden) return;
+  show($("support-overlay"), false);
+  (supportFocus?.isConnected ? supportFocus : $("btn-logs")).focus();
+}
+$("btn-help").onclick = () => openSupport("help");
+$("btn-logs").onclick = () => openSupport("logs");
+$("support-close").onclick = closeSupport;
+$("support-overlay").addEventListener("click", (event) => {
+  if (event.target === $("support-overlay")) closeSupport();
+});
+$("logs-refresh").onclick = loadLogs;
+async function loadLogs() {
+  $("logs-refresh").disabled = true;
+  $("logs-coverage").textContent = "正在读取日志…";
+  try {
+    const res = await api("/api/logs", undefined, true);
+    if (!res.ok) throw new Error(res.msg || "读取日志失败");
+    fillCoverage($("logs-coverage"), res.coverage);
+    $("logs-file").textContent = res.log_file || "";
+  } catch (error) {
+    $("logs-coverage").textContent = `读取日志失败：${error.message}。请重启 run.bat 再试。`;
+    $("logs-file").textContent = "";
+  } finally { $("logs-refresh").disabled = false; }
+}
+$("logs-open").onclick = async () => {
+  const res = await api("/api/logs/open", {}, true);
+  if (!res || !res.ok) enqueueBanner((res && res.msg) || "打开日志文件失败");
 };
-
-$("btn-output").onclick = async () => {
-  const res = await api("/api/reveal", { path: "" });
-  if (!res.ok) alert("打开失败：" + res.msg);
-};
-
-
-
-
 
 const cState = {
   loaded: false,
   contacts: [],
-  columns: ["remark", "nickname", "wechat_id", "region", "signature"],  
+  columns: ["remark", "nickname", "wechat_id", "region", "signature"],
   page: 0,
   pageSize: 100,
 };
 
 
-const CONTACT_COLS = {
+let CONTACT_COLS = {
   remark: "备注名",
   nickname: "实际名称",
   wechat_id: "微信号",
@@ -181,21 +254,21 @@ function switchTab(which) {
   $("tab-moments").classList.toggle("active", which === "moments");
   $("tab-wechat").classList.toggle("active", which === "wechat");
   $("tab-contacts").classList.toggle("active", which === "contacts");
-  if (which === "contacts" && !cState.loaded) loadContactsAll();
+  if (which !== "wechat") stopWatch();
+  else if (state.article && !$("author").hidden) startWatch();
+  if (which === "contacts" && !cState.loaded && mState.inited) loadContactsAll();
 }
 $("tab-moments").onclick = () => switchTab("moments");
 $("tab-wechat").onclick = () => switchTab("wechat");
 $("tab-contacts").onclick = () => switchTab("contacts");
 
-
-
 const mState = {
   inited: false,
   account: "",
-  contacts: [],      
-  posts: [],         
-  picked: new Set(), 
-  selected: new Set(), 
+  contacts: [],
+  posts: [],
+  picked: new Set(),
+  selected: new Set(),
   anchor: null,
   focus: null,
   page: 0,
@@ -204,8 +277,6 @@ const mState = {
 
 $("m-init").onclick = initMoments;
 
-
-
 async function restoreMoments() {
   let res;
   try {
@@ -213,67 +284,61 @@ async function restoreMoments() {
   } catch (e) {
     return;
   }
-  if (!res || !res.ok || !res.ready) return;
+  if (!res || !res.ok) return;
+  if (res.init_job) {
+    setInitBusy();
+    startJob(res.init_job, "刷新微信缓存", "", finishInit, "init");
+  }
+  if (!res.ready) return;
   mState.inited = true;
   mState.account = res.account || "";
-  resetInitBtn();
+  if (!res.init_job) resetInitBtn();
   show($("m-body"), true);
-  await loadContacts();       
+  await loadContacts();
   await refreshTimeline();
   loadContactsAll();
 }
-restoreMoments();
 
-async function initMoments() {
-  $("m-init").disabled = true;
-  $("m-init").textContent = "解密中…";
-  let res;
-  try {
-    res = await api("/api/moments/init", {});
-  } catch (e) { return; }
-  if (!res.ok) { alert(res.msg || "初始化解密失败"); resetInitBtn(); return; }
-  
-  mInitPoll = setInterval(() => pollInitJob(res.job), 1200);
+function setInitBusy() {
+  for (const id of ["m-init", "c-init"]) {
+    $(id).disabled = true;
+    $(id).textContent = "刷新中…";
+  }
 }
 
-let mInitPoll = null;
-
-async function pollInitJob(jobId) {
-  let res;
+async function initMoments() {
+  setInitBusy();
   try {
-    res = await api(`/api/job/${jobId}`, undefined, true);
-  } catch (e) { return; }
-  if (!res.ok) return;
-  const job = res.job;
-  $("m-status").textContent = job.message;
-  if (job.status === "done") {
-    clearInterval(mInitPoll);
-    mInitPoll = null;
-    mState.inited = true;
-    mState.account = (job.results && job.results[0] && job.results[0].account) || "";
-    resetInitBtn();
-    $("m-status").textContent = job.message;
-    show($("m-body"), true);
-    await loadContacts();       
-    await refreshTimeline();
-    loadContactsAll();   
-  } else if (job.status === "error") {
-    clearInterval(mInitPoll);
-    mInitPoll = null;
-    resetInitBtn();
-    $("m-status").textContent = "";
-    alert(job.message);
-  }
+    const res = await api("/api/moments/init", {});
+    if (!res.ok) { resetInitBtn(); return; }
+    startJob(res.job, "刷新微信缓存", "", finishInit, "init");
+  } catch (error) { resetInitBtn(); }
+}
+
+async function finishInit(job) {
+  resetInitBtn();
+  if (job.status !== "done") return;
+  lastCoverageSignature = "";
+  mState.inited = true;
+  mState.account = job.results?.[0]?.account || "";
+  cState.loaded = false;
+  show($("m-body"));
+  await loadContacts();
+  await refreshTimeline();
+  await loadContactsAll();
 }
 
 function resetInitBtn() {
   $("m-init").disabled = false;
-  $("m-init").textContent = mState.inited ? "重新解密" : "初始化解密";
+  $("m-init").textContent = "刷新";
+  const ci = $("c-init");
+  ci.disabled = false;
+  ci.textContent = "刷新";
 }
 
 async function loadContacts() {
   const res = await api("/api/moments/contacts", {});
-  if (!res.ok) { enqueueBanner(res.msg || "好友列表加载失败"); return; }
+  if (!res.ok) return;
   mState.contacts = sortContactsByPinyin(res.contacts || []);
   mState.picked = new Set(mState.contacts.map((c) => c.wxid));
   renderFriends();
@@ -300,7 +365,7 @@ function renderFriends() {
       cb.type = "checkbox";
       cb.dataset.wxid = c.wxid;
       cb.checked = mState.picked.has(c.wxid);
-      
+
       const parts = [];
       if (c.remark) parts.push(c.remark);
       if (c.nickname && c.nickname !== c.remark) parts.push(c.nickname);
@@ -328,7 +393,7 @@ function updateFriendCount() {
   const btn = $("m-friend-all");
   btn.classList.toggle("active", all);
   btn.textContent = all ? "已全选" : "全选";
-  
+
   const dates = [];
   if ($("m-start").value) dates.push($("m-start").value.slice(5).replace("-", "/"));
   if ($("m-end").value) dates.push($("m-end").value.slice(5).replace("-", "/"));
@@ -363,28 +428,91 @@ $("m-friend-clear").onclick = () => {
 $("m-start").addEventListener("change", refreshTimeline);
 $("m-end").addEventListener("change", refreshTimeline);
 
-
-
 function openFilter() {
-  renderFriends();           
+  renderFriends();
   updateFriendCount();
   show($("m-filter-overlay"), true);
 }
 $("m-filter-btn").onclick = openFilter;
 const closeFilter = () => show($("m-filter-overlay"), false);
 $("fm-close").onclick = closeFilter;
-$("fm-cancel").onclick = closeFilter;
 $("fm-apply").onclick = closeFilter;
 $("m-filter-overlay").addEventListener("click", (e) => {
   if (e.target === $("m-filter-overlay")) closeFilter();
 });
 
+let lastCoverageSignature = "";
+function shiftDate(value, days) {
+  const date = new Date(`${value.slice(0, 10)}T12:00:00`);
+  date.setDate(date.getDate() + days);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+function coveragePeriods(report) {
+  if (!report) return [];
+  const periods = (report.large_gaps || []).map((gap) => ({
+    start: shiftDate(gap.from, 1), end: shiftDate(gap.to, -1), days: gap.gap_days,
+  }));
+  if (report.local_stale_days >= (report.large_gap_threshold_days || 21) && report.local_latest) {
+    const start = shiftDate(report.local_latest, 1);
+    periods.push({ start, end: shiftDate(start, report.local_stale_days - 1), days: report.local_stale_days });
+  }
+  return periods.sort((a, b) => a.start.localeCompare(b.start));
+}
+function fillCoverage(box, report) {
+  box.replaceChildren();
+  if (!report) {
+    box.textContent = "请先刷新，再查看朋友圈缺失时间段。";
+    return;
+  }
+  const range = document.createElement("div");
+  range.className = "coverage-range";
+  range.textContent = report.local_earliest
+    ? `本地朋友圈范围：${report.local_earliest.slice(0, 10)} 至 ${report.local_latest.slice(0, 10)} · ${report.local_posts_with_time} 条`
+    : "本地尚无朋友圈记录";
+  box.append(range);
+  const periods = coveragePeriods(report);
+  const summary = document.createElement("p");
+  summary.textContent = !report.local_earliest ? "本地没有可识别时间的记录。"
+    : periods.length ? `发现 ${periods.length} 段疑似缺失时间：`
+    : "未发现连续 21 天以上无记录的时段。";
+  box.append(summary);
+  if (periods.length) {
+    const list = document.createElement("ul");
+    list.className = "coverage-periods";
+    for (const period of periods) {
+      const line = document.createElement("li");
+      line.textContent = `${period.start} 至 ${period.end} · ${period.days} 天`;
+      list.append(line);
+    }
+    box.append(list);
+  }
+}
+function renderCoverage(report) {
+  if (!report) return;
+  const periods = coveragePeriods(report);
+  const signature = JSON.stringify([report.local_earliest, report.local_latest, periods]);
+  if (signature === lastCoverageSignature) return;
+  lastCoverageSignature = signature;
+  floating.close("coverage");
+  if (report.local_earliest && !periods.length) return;
+  const popup = floating.open("coverage", "朋友圈疑似缺失时间段", "warning");
+  fillCoverage(popup.body, report);
+  const link = document.createElement("button");
+  link.className = "ghost";
+  link.textContent = "查看完整日志";
+  link.onclick = () => { floating.close("coverage"); openSupport("logs"); };
+  popup.body.append(link);
+  floating.finish(popup, 8000);
+}
+
+let timelineRequest = 0;
 async function refreshTimeline() {
   if (!mState.inited) return;
+  const requestId = ++timelineRequest;
   const sv = $("m-start").value;
   const ev = $("m-end").value;
   if (sv && ev && ev < sv) {
-    enqueueBanner("结束日期必须晚于开始日期");
+    notify("结束日期必须晚于开始日期", "warning");
     return;
   }
   const res = await api("/api/moments/timeline", {
@@ -392,16 +520,16 @@ async function refreshTimeline() {
     start: sv || "",
     end: ev || "",
   });
+  if (requestId !== timelineRequest) return;
   if (!res.ok) {
-    
-    enqueueBanner(res.msg || "朋友圈列表加载失败，请稍后重试");
-    if (/未初始化|未就绪|解密/.test(res.msg || "")) {
+    if (/未初始化|未就绪|解密|请先点击「重新解密」/.test(res.msg || "")) {
       mState.inited = false;
       show($("m-body"), false);
       resetInitBtn();
     }
     return;
   }
+  renderCoverage(res.coverage);
   mState.posts = res.posts || [];
   mState.selected = new Set(mState.posts.map((_, i) => i));
   mState.anchor = null;
@@ -417,7 +545,7 @@ function renderTimeline() {
   const start = mState.page * size;
   const pagePosts = mState.posts.slice(start, start + size);
   pagePosts.forEach((p, j) => {
-    const i = start + j;   
+    const i = start + j;
     const row = document.createElement("div");
     row.className = "row mrow";
     row.dataset.i = i;
@@ -460,11 +588,11 @@ function renderTimeline() {
   $("m-status").textContent = `共计 ${mState.posts.length} 条`;
   if (!mState.posts.length) {
     $("m-list-count").textContent = mState.picked.size === 0
-      ? "未选择任何好友，列表为空（点筛选按钮全选即可恢复）"
+      ? "未选择任何好友"
       : "该筛选条件下没有朋友圈";
   } else {
     $("m-list-count").textContent =
-      `共 ${mState.posts.length} 条，勾选后可组合下载`;
+      `共 ${mState.posts.length} 条`;
   }
   renderPager($("m-pager"), mState.posts.length, size, mState.page,
     (p) => { mState.page = p; renderTimeline(); });
@@ -518,19 +646,15 @@ $("pd-overlay").addEventListener("click", (e) => {
 
 function updateExportBtn() {
   const n = mState.selected.size;
-  const btn = $("m-export");
-  btn.disabled = n === 0;
-  btn.textContent = `下载选中（${n} 条）`;
+  $("m-export").disabled = n === 0;
   const all = $("m-select-all");
   if (all) all.textContent = (mState.posts.length && n === mState.posts.length) ? "取消全选" : "全选";
 }
 
-
-
 $("m-list").addEventListener("click", (e) => {
   const row = e.target.closest(".mrow");
   if (!row || e.target.closest("button")) return;
-  if (e.target.closest("input")) return;   
+  if (e.target.closest("input")) return;
   const i = Number(row.dataset.i);
   if (e.shiftKey && mState.anchor !== null) {
     selectRangeM(mState.anchor, i);
@@ -563,8 +687,6 @@ function focusM(i) {
   const row = document.querySelector(`#m-list .mrow[data-i="${i}"]`);
   if (row) row.focus();
 }
-
-
 
 $("m-list").addEventListener("keydown", (e) => {
   const row = e.target.closest(".mrow");
@@ -619,25 +741,21 @@ $("m-select-all").onclick = () => {
   $("m-select-all").textContent = "取消全选";
 };
 
-
-
 $("m-export").onclick = async () => {
   if (!mState.selected.size) return;
   const picked = [...mState.selected].sort((a, b) => a - b)
     .map((i) => mState.posts[i])
     .filter(Boolean)
     .map((p) => ({ createTime: p.createTime, username: p.username }));
-  if (!picked.length) { alert("所选条目无效，请重新勾选"); return; }
+  if (!picked.length) { notify("所选条目无效，请重新勾选"); return; }
   const res = await api("/api/export", {
     type: "moments",
     picked,
     keep_interactions: $("m-keep").checked,
   });
-  if (!res.ok) { alert(res.msg || "导出失败"); return; }
+  if (!res.ok) return;
   startJob(res.job, `朋友圈 ${picked.length} 条`, res.dir || "");
 };
-
-
 
 $("c-init").onclick = initMoments;
 
@@ -649,14 +767,13 @@ async function loadContactsAll() {
     return;
   }
   if (!res.ok) {
-    enqueueBanner(res.msg || "好友列表加载失败，请先在朋友圈页解密封装");
     return;
   }
   cState.loaded = true;
   cState.contacts = sortContactsByPinyin(res.contacts || []);
+  CONTACT_COLS = res.columns || CONTACT_COLS;
   show($("c-body"), true);
-  $("c-init").textContent = "重新解密";
-  $("c-export").disabled = false;
+  $("c-export").disabled = cState.columns.length === 0;
   renderCols();
   renderContactTable();
 }
@@ -673,6 +790,7 @@ function renderCols() {
     cb.onchange = () => {
       if (cb.checked) cState.columns.push(key);
       else cState.columns = cState.columns.filter((k) => k !== key);
+      $("c-export").disabled = cState.columns.length === 0;
       renderContactTable();
     };
     lab.append(cb, document.createTextNode(label));
@@ -720,7 +838,7 @@ function renderContactTable() {
       const td = document.createElement("td");
       const v = cellText(c, col);
       if (col === "avatar" && v) {
-        
+
         const wrap = document.createElement("span");
         wrap.className = "avatar-cell";
         const link = document.createElement("a");
@@ -738,11 +856,9 @@ function renderContactTable() {
           ev.stopPropagation();
           try {
             await navigator.clipboard.writeText(v);
-            btn.textContent = "已复制";
-            btn.classList.add("copied");
-            setTimeout(() => { btn.textContent = "复制"; btn.classList.remove("copied"); }, 1500);
+            notify("头像链接已复制", "success");
           } catch (e) {
-            btn.textContent = "失败";
+            notify("复制失败，请检查浏览器的剪贴板权限。");
           }
         };
         wrap.append(btn);
@@ -756,7 +872,7 @@ function renderContactTable() {
     tbody.append(tr);
   });
 
-  $("c-count").textContent = `共 ${items.length} 位好友`;
+  $("c-count").textContent = `共 ${items.length} 人`;
   $("c-status").textContent = `共计 ${cState.contacts.length} 人`;
   renderPager($("c-pager"), items.length, size, cState.page,
     (p) => { cState.page = p; renderContactTable(); });
@@ -766,31 +882,38 @@ $("c-search").addEventListener("input", () => { cState.page = 0; renderContactTa
 
 $("c-export").onclick = async () => {
   const cols = cState.columns;
-  if (!cols.length) { enqueueBanner("请至少勾选一列再导出"); return; }
-  const res = await api("/api/contacts/export", { columns: cols });
-  if (!res.ok) { enqueueBanner(res.msg || "导出失败"); return; }
-  enqueueBanner(`好友列表已导出：${res.path}（${res.count} 人）`);
-  $("c-export").disabled = false;
+  if (!cols.length) { notify("请至少勾选一列再导出", "warning"); return; }
+  $("c-export").disabled = true;
+  const popup = floating.open("contacts-export", "正在导出好友列表…");
+  try {
+    const res = await api("/api/contacts/export", { columns: cols });
+    if (!res.ok) return;
+    popup.title.textContent = "好友列表已导出";
+    popup.card.dataset.level = "success";
+    popup.body.textContent = `${res.count} 人 · 保存到 ${res.path}`;
+    floating.finish(popup, 4000);
+  } catch (error) { /* The API helper displays the error. */ }
+  finally {
+    if (!popup.remaining) floating.close("contacts-export");
+    $("c-export").disabled = cState.columns.length === 0;
+  }
 };
-
 
 const state = {
   article: null,
-  articles: [],          
+  articles: [],
   selected: new Set(),
   anchor: null,
   focus: null,
   watchPoll: null,
   biz: "",
   listKey: "",
-  knownKeys: new Set(),  
+  knownKeys: new Set(),
   page: 0,
   pageSize: 50,
 };
 
 const keyOf = (a) => `${a.mid || ""}_${a.idx || ""}`;
-
-
 
 $("btn-parse").onclick = doParse;
 $("url").addEventListener("keydown", (e) => { if (e.key === "Enter") doParse(); });
@@ -799,17 +922,15 @@ async function doParse() {
   const url = $("url").value.trim();
   if (!url) return;
   stopWatch();
-  stopJobPoll();
   $("btn-parse").disabled = true;
   $("btn-parse").textContent = "解析中…";
   try {
     const res = await api("/api/parse", { url });
-    if (!res.ok) { alert(res.msg || "解析失败"); return; }
+    if (!res.ok) return;
     state.article = res.article;
     state.biz = res.article.biz;
     renderArticle();
     hideAuthor();
-    $("dl-banner").hidden = true;
   } finally {
     $("btn-parse").disabled = false;
     $("btn-parse").textContent = "解析";
@@ -831,16 +952,12 @@ function hideAuthor() {
   state.selected.clear();
 }
 
-
-
 $("btn-export").onclick = async () => {
   if (!state.article) return;
   const res = await api("/api/export", { type: "article", url: state.article.url });
-  if (!res.ok) { alert(res.msg || "导出失败"); return; }
+  if (!res.ok) return;
   startJob(res.job, state.article.title || "文章", res.dir || "");
 };
-
-
 
 $("btn-author").onclick = loadAuthor;
 
@@ -849,23 +966,25 @@ async function loadAuthor() {
   stopWatch();
   state.knownKeys = new Set();
   state.listKey = "";
+  state.articles = [];
+  state.selected.clear();
+  state.anchor = null;
+  state.focus = null;
   show($("author"), true);
   $("author-name").textContent = state.article.account || "该公众号";
   $("author-count").textContent = "加载中…";
-  $("list").innerHTML = "";
-  show($("open-panel"), false);
+  renderList();
 
   const res = await api("/api/author/articles", { url: state.article.url });
   if (!res.ok) {
-    $("author-count").textContent = res.msg || "加载失败";
+    $("author-count").textContent = "";
     return;
   }
   if (res.need_open) {
-    $("author-count").textContent = "缓存里还没有文章记录";
-    show($("open-panel"), true);
-    $("open-status").textContent = res.msg;
+    $("author-count").textContent = "已收录 0 篇";
+    notify(res.msg || "先在微信中点开该公众号的文章，会自动收录。", "warning");
     state.articles = [];
-    startWatch();   
+    startWatch();
     return;
   }
   state.articles = res.articles || [];
@@ -873,71 +992,82 @@ async function loadAuthor() {
   $("author-count").innerHTML =
     '<span class="live-dot"></span>正在监听微信 · 已收录 ' +
     state.articles.length + " 篇";
-  show($("open-panel"), true);
-  $("open-status").textContent =
-    "继续在微信里点开还没收录的文章，列表会实时变多；点完直接勾选下载。";
+  notify("列表只含已点开过的文章。在微信继续点开该公众号的文章，列表会自动更新。", "info");
   renderList();
   startWatch();
 }
 
-
-
-function startWatch() {
+let watchGeneration = 0;
+let lastWatchWarning = "";
+let watchStopPromise = Promise.resolve();
+async function startWatch() {
   if (!state.biz || state.watchPoll) return;
-  api("/api/author/watch/start", { biz: state.biz }, true)
-    .catch(() => {})
-    .then(() => {
-      if (state.watchPoll) return;
-      state.watchPoll = setInterval(watchPoll, 3000);
-    });
+  const generation = ++watchGeneration;
+  const biz = state.biz;
+  try {
+    await watchStopPromise;
+    if (generation !== watchGeneration) return;
+    const res = await api("/api/author/watch/start", { biz });
+    if (!res.ok || generation !== watchGeneration) return;
+    state.watchPoll = setTimeout(watchPoll, 3000);
+  } catch (error) { /* The API helper displays the error. */ }
 }
 
 async function watchPoll() {
   if (!state.biz) return;
+  const generation = watchGeneration;
   let res;
   try {
-    res = await api("/api/author/watch/status", { biz: state.biz }, true);
-  } catch (e) {
-    return;   
+    res = await api("/api/author/watch/status", { biz: state.biz });
+  } catch (error) {
+    if (generation === watchGeneration) state.watchPoll = setTimeout(watchPoll, 3000);
+    return;
   }
+  if (generation !== watchGeneration) return;
+  state.watchPoll = setTimeout(watchPoll, 3000);
   if (!res.ok) return;
+  const watchWarning = [res.msg, res.failed_titles ? `${res.failed_titles} 篇文章信息补全失败，请稍后重新收录。` : ""].filter(Boolean).join("\n");
+  if (watchWarning && watchWarning !== lastWatchWarning) notify(watchWarning, "warning");
+  lastWatchWarning = watchWarning;
   const n = res.total;
 
-  
+
   const listening = res.running
     ? '<span class="live-dot"></span>正在监听微信'
     : "未在监听";
   let txt = `${listening} · 已收录 ${n} 篇`;
-  if (res.filling_left > 0) txt += `，正在补齐标题/发表时间（剩 ${res.filling_left}）`;
+  if (res.filling_left > 0) txt += `，待补齐标题/时间 ${res.filling_left} 篇`;
+  if (res.failed_titles > 0) txt += `，${res.failed_titles} 篇信息补全失败`;
   $("author-count").innerHTML = txt;
 
-  
-  (res.added || []).forEach((a) => {
-    if (state.knownKeys.has(keyOf(a))) return;
-    enqueueBanner(`成功读取《${a.title || `文章 ${a.mid}`}》`);
-  });
-  (res.articles || []).forEach((a) => state.knownKeys.add(keyOf(a)));
 
-  
+  (res.articles || []).forEach((article) => {
+    if (!state.knownKeys.has(keyOf(article))) {
+      enqueueBanner(`成功读取《${article.title || `文章 ${article.mid}`}》`);
+    }
+    state.knownKeys.add(keyOf(article));
+  });
+
   const key = (res.articles || [])
     .map((a) => `${a.title || ""}|${a.time || ""}`).join("\n");
   if (key !== state.listKey) {
-    const before = state.selected;
+    const selectedKeys = new Set([...state.selected].map((i) => keyOf(state.articles[i] || {})));
     state.articles = res.articles || [];
-    state.selected = new Set(
-      [...before].filter((i) => i < state.articles.length)
-    );
+    state.selected = new Set(state.articles.flatMap((article, i) => selectedKeys.has(keyOf(article)) ? [i] : []));
+    state.anchor = null;
+    state.focus = null;
     state.listKey = key;
     renderList();
   }
 }
 
 function stopWatch() {
+  watchGeneration++;
   if (state.watchPoll) {
-    clearInterval(state.watchPoll);
+    clearTimeout(state.watchPoll);
     state.watchPoll = null;
   }
-  if (state.biz) api("/api/author/watch/stop", { biz: state.biz }, true).catch(() => {});
+  if (state.biz) watchStopPromise = api("/api/author/watch/stop", { biz: state.biz }, true).catch(() => {});
 }
 
 function renderList() {
@@ -948,7 +1078,7 @@ function renderList() {
   if (state.page > pages - 1) state.page = pages - 1;
   const start = state.page * size;
   state.articles.slice(start, start + size).forEach((a, j) => {
-    const i = start + j;   
+    const i = start + j;
     const row = document.createElement("div");
     row.className = "row";
     row.dataset.i = i;
@@ -970,7 +1100,7 @@ function renderList() {
 
     const btn = document.createElement("button");
     btn.textContent = "下载";
-    
+
     btn.disabled = !a.title;
     if (a.title) btn.className = "primary";
     btn.title = a.title ? "下载这篇文章" : "正在解析标题，稍等片刻即可下载";
@@ -988,11 +1118,10 @@ function renderList() {
 
 function updatePickBtn() {
   const n = state.selected.size;
+  $("btn-download-all").disabled = state.articles.length === 0;
   $("btn-download-picked").disabled = n === 0;
   $("btn-download-picked").textContent = n ? `下载选中 (${n})` : "下载选中";
 }
-
-
 
 $("list").addEventListener("click", (e) => {
   const row = e.target.closest(".row");
@@ -1019,18 +1148,16 @@ function selectRange(a, b) {
   updatePickBtn();
 }
 function paint() {
-  document.querySelectorAll(".row").forEach((row) => {
+  document.querySelectorAll("#list .row").forEach((row) => {
     const i = Number(row.dataset.i);
     row.querySelector("input").checked = state.selected.has(i);
     row.classList.toggle("focus", state.focus === i);
   });
 }
 function focusRow(i) {
-  const row = document.querySelector(`.row[data-i="${i}"]`);
+  const row = document.querySelector(`#list .row[data-i="${i}"]`);
   if (row) row.focus();
 }
-
-
 
 $("list").addEventListener("keydown", (e) => {
   const row = e.target.closest(".row");
@@ -1098,15 +1225,13 @@ $("btn-select-all").onclick = () => {
   $("btn-select-all").textContent = "取消全选";
 };
 
-
-
 async function downloadOne(i) {
   const a = state.articles[i];
   const res = await api("/api/export", {
     type: "author", articles: [a],
     account: state.article.account, biz: state.biz, mode: "select",
   });
-  if (!res.ok) { alert(res.msg || "导出失败"); return; }
+  if (!res.ok) return;
   startJob(res.job, `下载：${a.title || a.mid}`, res.dir || "");
 }
 
@@ -1117,7 +1242,7 @@ $("btn-download-picked").onclick = async () => {
     type: "author", articles: picked,
     account: state.article.account, biz: state.biz, mode: "select",
   });
-  if (!res.ok) { alert(res.msg || "导出失败"); return; }
+  if (!res.ok) return;
   startJob(res.job, `下载选中的 ${picked.length} 篇`, res.dir || "");
 };
 
@@ -1127,6 +1252,20 @@ $("btn-download-all").onclick = async () => {
     type: "author", articles: state.articles,
     account: state.article.account, biz: state.biz, mode: "all",
   });
-  if (!res.ok) { alert(res.msg || "导出失败"); return; }
+  if (!res.ok) return;
   startJob(res.job, `下载全部 ${state.articles.length} 篇`, res.dir || "");
 };
+
+// Initialize after all state objects exist (including contacts and author state).
+restoreMoments();
+pollDiagnostics();
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") { closeFilter(); show($("pd-overlay"), false); closeSupport(); }
+  if (event.key === "Tab" && !$("support-overlay").hidden) {
+    const focusable = [...$("support-overlay").querySelectorAll("button:not(:disabled), summary, [tabindex='0']")]
+      .filter((element) => element.getClientRects().length);
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  }
+});

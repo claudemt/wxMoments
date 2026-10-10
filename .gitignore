@@ -1,8 +1,10 @@
 __pycache__/
 *.pyc
 runtime/.venv/
-runtime/install.log
-runtime/wxmoments.log
+runtime/*.log
+runtime/dependencies.sha256
+runtime/startup-error.html
 runtime/output/
+runtime/verification/
 output/
 config/config.json

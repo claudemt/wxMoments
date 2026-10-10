@@ -19,6 +19,7 @@ from __future__ import annotations
 import gzip
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -28,8 +29,6 @@ from . import wxprofile
 ARTICLE_RE = re.compile(
     rb"https://mp\.weixin\.qq\.com/s\?[^\x00-\x20\"'<>\\]{0,1200}"
 )
-
-
 
 
 PARAM_RE = re.compile(
@@ -73,12 +72,9 @@ class Harvested:
         return datetime.fromtimestamp(self.publish_ts).strftime("%Y%m%d")
 
 
-
-
-
-
 _PAGE_MAP: dict[str, dict] = {}
 _PAGE_MAP_KEY: tuple | None = None
+_PAGE_MAP_LOCK = threading.RLock()
 
 
 def _cache_sig() -> tuple:
@@ -93,9 +89,14 @@ def _cache_sig() -> tuple:
 
 
 def _scan_cache_pages(biz: str) -> dict[str, dict]:
+    with _PAGE_MAP_LOCK:
+        return _scan_cache_pages_locked(biz)
+
+
+def _scan_cache_pages_locked(biz: str) -> dict[str, dict]:
     """扫全部 profile 的 Cache_Data/f_*，建 mid_idx -> {url,title,ts}（只收目标号）。"""
     global _PAGE_MAP, _PAGE_MAP_KEY
-    sig = _cache_sig()
+    sig = (biz, _cache_sig())
     if sig and sig == _PAGE_MAP_KEY:
         return _PAGE_MAP
     out: dict[str, dict] = {}
@@ -120,12 +121,12 @@ def _scan_cache_pages(biz: str) -> dict[str, dict]:
                 continue
             try:
                 text = body.decode("utf-8", "ignore")
-            except Exception:  
+            except Exception:
                 continue
             u = OG_URL_RE.search(text)
             if not u:
                 continue
-            
+
             m = re.search(
                 r"/s\?.*?__biz=([^&\"']+)&.*?mid=(\d+)&.*?idx=(\d+)&.*?sn=([0-9a-f]+)"
                 r"(&.*?chksm=([0-9a-f]+))?", u.group(1))
@@ -144,10 +145,7 @@ def _scan_cache_pages(biz: str) -> dict[str, dict]:
     return out
 
 
-
-
-
-def _parse_url(raw: str) -> dict | None:
+def parse_article_url(raw: str) -> dict | None:
     q = {}
     for k, v in PARAM_RE.findall(raw.encode("latin-1")):
         q[k.decode("latin-1")] = v.decode("latin-1")
@@ -187,7 +185,7 @@ def public_url(art, fallback: str = "") -> str:
     try:
         chksm = getattr(art, "chksm", "") or ""
         if not chksm:
-            
+
             return fallback
         url = clean_url({
             "biz": art.biz, "mid": art.mid, "idx": art.idx or "1",
@@ -195,7 +193,7 @@ def public_url(art, fallback: str = "") -> str:
         })
         if url.startswith("https://mp.weixin.qq.com/s?"):
             return url
-    except Exception:  
+    except Exception:
         pass
     return fallback
 
@@ -208,36 +206,25 @@ def harvest_articles(biz: str, use_pages: bool = True) -> list[Harvested]:
     use_pages=False：只读三个 SQLite（<200ms），适合后台轮询增量收集。
     """
     found: dict[str, Harvested] = {}
-    for profile in wxprofile.find_profiles():
-        for name in wxprofile.DATA_FILES:
-            path = os.path.join(profile, name)
-            if not os.path.exists(path):
-                continue
-            if name in wxprofile.SQL_TABLES:
-                rows: list[tuple[str, int, str]] = wxprofile._sqlite_rows(path)
-            else:
-                rows = wxprofile._text_urls(path)
-            for _src, _stamp, raw in rows:
-                m = ARTICLE_RE.search(raw.encode("latin-1"))
-                if not m:
-                    continue
-                p = _parse_url(m.group(0).decode("latin-1"))
-                if not p or p["biz"] != biz:
-                    continue
-                key = f"{p['mid']}_{p['idx']}"
-                old = found.get(key)
-                if old and old.chksm:
-                    continue
-                found[key] = Harvested(
-                    url=clean_url(p),
-                    mid=p["mid"], idx=p["idx"], sn=p["sn"], chksm=p["chksm"],
-                )
+    for _src, _stamp, raw in wxprofile.iter_cached_urls():
+        m = ARTICLE_RE.search(raw.encode("latin-1"))
+        if not m:
+            continue
+        p = parse_article_url(m.group(0).decode("latin-1"))
+        if not p or p["biz"] != biz:
+            continue
+        key = f"{p['mid']}_{p['idx']}"
+        old = found.get(key)
+        if old and old.chksm:
+            continue
+        found[key] = Harvested(
+            url=clean_url(p),
+            mid=p["mid"], idx=p["idx"], sn=p["sn"], chksm=p["chksm"],
+        )
 
-    if not found:
-        return []
 
     if use_pages:
-        
+
         pages = _scan_cache_pages(biz)
         for key, pg in pages.items():
             if key in found:
@@ -255,7 +242,7 @@ def harvest_articles(biz: str, use_pages: bool = True) -> list[Harvested]:
                 sn=sm.group(1) if sm else "",
                 chksm=cm.group(1) if cm else "",
             )
-        
+
         for h in found.values():
             pg = pages.get(h.key)
             if pg and pg.get("title"):
@@ -265,9 +252,6 @@ def harvest_articles(biz: str, use_pages: bool = True) -> list[Harvested]:
 
     out = sorted(found.values(), key=lambda h: int(h.mid), reverse=True)
     return out
-
-
-
 
 
 def write_export_meta(root: str, account: str, mode: str,

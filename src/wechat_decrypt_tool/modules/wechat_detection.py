@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import os
+from .logging_config import get_logger
+
+logger = get_logger(__name__)
 import re
 import sys
 from pathlib import Path
@@ -49,7 +52,7 @@ SYSTEM_SCAN_SKIP_NAMES = {
 
 def _debug(message: str) -> None:
     if _DEBUG_DETECTION:
-        print(f"[DEBUG] {message}")
+        logger.debug("%s", message)
 
 
 def parse_global_config(base_path: str) -> dict[str, str] | None:

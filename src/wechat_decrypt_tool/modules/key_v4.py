@@ -3,6 +3,9 @@ import multiprocessing
 import struct
 import hmac
 import os
+from .logging_config import get_logger
+
+logger = get_logger(__name__)
 from ctypes import wintypes
 
 from Crypto.Protocol.KDF import PBKDF2
@@ -50,7 +53,7 @@ _DEBUG_KEY_SCAN = os.environ.get("WXMOMENTS_DEBUG_KEY_SCAN", "").strip().lower()
 
 def _debug(message: str) -> None:
     if _DEBUG_KEY_SCAN:
-        print(message)
+        logger.debug("%s", message)
 
 
 def xor_raw_key(raw_key: bytes, internal_db_key: bytes | None) -> bytes:

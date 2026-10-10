@@ -4,26 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>微信数据导出工具</title>
-<link rel="stylesheet" href="/static/style.css?v=18">
+<link rel="stylesheet" href="/static/style.css?v=23">
 </head>
 <body>
 <div class="app">
 
-  
-
-  <div class="banner" id="banner" hidden></div>
-
-  
-
-  <div class="dl-banner" id="dl-banner" hidden>
-    <div class="dl-title" id="dl-title">下载中…</div>
-    <div class="dl-progress"><div id="dl-bar"></div></div>
-    <div class="dl-msg" id="dl-msg"></div>
-    <div class="dl-row">
-      <div class="dl-dir" id="dl-dir"></div>
-      <button class="dl-cancel" id="btn-dl-cancel" hidden>取消</button>
-    </div>
-  </div>
+  <div class="floating-windows" id="floating-windows" aria-label="提示与任务进度"></div>
 
   <header class="top">
     <div class="brand">
@@ -38,6 +24,8 @@
       </div>
     </div>
     <div class="top-actions">
+      <button class="ghost" id="btn-help">帮助</button>
+      <button class="ghost" id="btn-logs">查看日志</button>
       <button class="ghost" id="btn-output">打开输出目录</button>
     </div>
   </header>
@@ -48,15 +36,16 @@
     <button class="tab" id="tab-contacts">好友列表导出</button>
   </nav>
 
-  
-
   <section class="panel" id="panel-moments">
     <div class="moments-head">
       <div>
         <strong>朋友圈导出</strong>
         <span class="muted" id="m-status"></span>
       </div>
-      <button class="primary" id="m-init">初始化解密</button>
+      <div class="art-buttons">
+        <button class="primary" id="m-init">刷新</button>
+        <button class="primary" id="m-export" disabled>下载</button>
+      </div>
     </div>
 
     <div class="m-body" id="m-body" hidden>
@@ -75,14 +64,8 @@
       </div>
       <div class="list" id="m-list" tabindex="-1"></div>
       <div class="pager" id="m-pager"></div>
-
-      <div class="m-foot">
-        <button class="primary" id="m-export" disabled>下载选中（0 条）</button>
-      </div>
     </div>
   </section>
-
-  
 
   <section class="panel" id="panel-wechat" hidden>
 
@@ -116,15 +99,6 @@
         </div>
       </div>
 
-      <div class="open-panel" id="open-panel" hidden>
-        <div class="open-title">目前识别到的只是你曾经点开过的文章，不是该作者的全部文章</div>
-        <ol class="open-steps">
-          <li>你需要把每一篇文章都<b>点开一遍</b>（点开即可，可以立刻按 <b>Ctrl+W</b> 关掉），才能获得作者的完整文章列表</li>
-          <li>下面的收录列表会实时更新，点完直接勾选下载</li>
-        </ol>
-        <div class="open-status" id="open-status"></div>
-      </div>
-
       <div class="list-head">
         <span class="muted">标题</span>
         <span class="muted">时间</span>
@@ -136,8 +110,6 @@
 
   </section>
 
-  
-
   <section class="panel" id="panel-contacts" hidden>
     <div class="moments-head">
       <div>
@@ -145,7 +117,7 @@
         <span class="muted" id="c-status"></span>
       </div>
       <div class="art-buttons">
-        <button class="ghost" id="c-init">初始化解密</button>
+        <button class="primary" id="c-init">刷新</button>
         <button class="primary" id="c-export" disabled>导出</button>
       </div>
     </div>
@@ -169,10 +141,8 @@
     </div>
   </section>
 
-  
-
   <div class="overlay" id="m-filter-overlay" hidden>
-    <div class="filter-modal">
+    <div class="filter-modal" role="dialog" aria-modal="true" aria-label="筛选朋友圈">
       <div class="fm-head">
         <strong>筛选朋友圈</strong>
         <button class="fm-close" id="fm-close" title="关闭">✕</button>
@@ -186,7 +156,7 @@
 
       <div class="m-friends-head">
         <input id="m-friend-search" type="text" spellcheck="false"
-               placeholder="搜索好友（默认全选，取消勾选即可只看其余人）">
+               placeholder="搜索好友">
         <span class="muted" id="m-friend-count"></span>
         <button id="m-friend-all">全选</button>
         <button id="m-friend-clear">清空</button>
@@ -194,15 +164,14 @@
       <div class="m-friend-list" id="m-friend-list"></div>
 
       <div class="fm-foot">
-        <span class="muted fm-hint">改动立即生效，关闭后列表已按当前筛选显示</span>
-        <button class="ghost" id="fm-cancel">取消</button>
+        <span class="muted fm-hint">改动立即生效</span>
         <button class="primary" id="fm-apply">完成</button>
       </div>
     </div>
   </div>
 
   <div class="overlay" id="pd-overlay" hidden>
-    <div class="pd-modal">
+    <div class="pd-modal" role="dialog" aria-modal="true" aria-label="朋友圈详情">
       <div class="fm-head">
         <strong>朋友圈详情</strong>
         <button class="fm-close" id="pd-close" title="关闭">✕</button>
@@ -211,7 +180,32 @@
     </div>
   </div>
 
+  <div class="overlay" id="support-overlay" hidden>
+    <div class="support-modal" role="dialog" aria-modal="true" aria-labelledby="support-title" tabindex="-1">
+      <div class="fm-head">
+        <strong id="support-title">帮助</strong>
+        <button class="fm-close" id="support-close" aria-label="关闭">✕</button>
+      </div>
+      <div id="help-body" class="support-body" hidden>
+        <details open>
+          <summary>朋友圈导出不完整？</summary>
+          <p>该工具只能识别你在这台电脑上曾经浏览过的朋友圈。</p>
+          <p>如果你从未在这台电脑上浏览过某条朋友圈：目前仍有权限的话，现在去浏览一次，再点击「刷新」即可识别；如果已经没有权限，就永远无法识别。</p>
+          <p>因此，想导出朋友圈全量快照：在这台电脑上打开朋友圈，一路向下翻，只要翻到过，工具就一定能识别。若只关心几位好友，打开他们的个人主页和置顶朋友圈，同样一路向下翻。翻完点击「刷新」即可。</p>
+        </details>
+      </div>
+      <div id="logs-body" class="support-body" hidden>
+        <div class="support-toolbar"><span class="muted">以最近成功刷新的全量朋友圈为准</span><button class="ghost" id="logs-refresh">刷新日志</button></div>
+        <div id="logs-coverage"></div>
+        <div class="log-file-row">
+          <span class="muted">完整日志：<code id="logs-file"></code></span>
+          <button class="ghost" id="logs-open">打开日志文件</button>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
-<script src="/static/app.js?v=25"></script>
+<script src="/static/floating.js?v=1"></script>
+<script src="/static/app.js?v=34"></script>
 </body>
 </html>

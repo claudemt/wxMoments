@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -13,10 +11,6 @@ import requests
 from bs4 import BeautifulSoup
 
 from .config import FETCH_UA, SESSION_FILE
-
-
-
-
 
 
 @dataclass
@@ -30,18 +24,6 @@ class Session:
     user_agent: str = ""
     host: str = "mp.weixin.qq.com"
     ts: float = field(default_factory=time.time)
-
-    def to_dict(self) -> dict:
-        return self.__dict__.copy()
-
-    @property
-    def age_text(self) -> str:
-        mins = int((time.time() - self.ts) / 60)
-        if mins < 1:
-            return "刚刚"
-        if mins < 60:
-            return f"{mins} 分钟前"
-        return f"{mins // 60} 小时前"
 
 
 def load_sessions() -> dict[str, Session]:
@@ -62,8 +44,7 @@ def load_sessions() -> dict[str, Session]:
 def _read_session_raw() -> dict | None:
     """读 session.json，损坏时尽量从残留段里救回最新一份有效 JSON。
 
-    旧实现：文件一损坏 load_sessions 就静默返回 {}，下次 save_session 会把
-    之前的全部凭据覆盖掉，坏文件只会越来越空。这里改为：
+    只兼容读取旧版登录态；当前版本不再写入抓包凭据。
     - 整文件合法 → 直接用；
     - 不合法 → 用 raw_decode 逐段扫描，收集所有完整 JSON 段，
       取最后一段当数据（多进程并发写撕裂时，最后写完的那段通常最新）；
@@ -94,40 +75,19 @@ def _read_session_raw() -> dict | None:
     return found
 
 
-def _write_session_atomic(data: dict) -> None:
-    """原子写 session.json：先写临时文件再 replace，避免并发写撕裂文件。"""
-    tmp = None
-    try:
-        fd, tmp = tempfile.mkstemp(
-            prefix="session.", suffix=".tmp", dir=str(SESSION_FILE.parent))
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, ensure_ascii=False, indent=2)
-        os.replace(tmp, SESSION_FILE)
-        tmp = None
-    finally:
-        if tmp and os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-
-
-
-
-
 @dataclass
 class Article:
     url: str
     title: str = ""
-    account: str = ""       
-    author: str = ""        
+    account: str = ""
+    author: str = ""
     biz: str = ""
     sn: str = ""
     mid: str = ""
     idx: str = ""
-    chksm: str = ""         
+    chksm: str = ""
     publish_ts: int = 0
-    content_html: str = ""  
+    content_html: str = ""
     cover: str = ""
     digest: str = ""
 
@@ -170,51 +130,20 @@ def _var(html: str, name: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-
-
-
-
-_CHKSM_MAP: dict[tuple[str, str, str, str], str] | None = None
-
-
-def _load_chksm_map() -> dict[tuple[str, str, str, str], str]:
-    """从 XWEB 缓存（Share Data/Favicons/History）构建 (biz,mid,idx,sn)->chksm。"""
-    global _CHKSM_MAP
-    if _CHKSM_MAP is not None:
-        return _CHKSM_MAP
-    out: dict[tuple[str, str, str, str], str] = {}
-    try:
-        from . import wxprofile
-        for rec in wxprofile.scan():
-            url = rec.get("url") or ""
-            m = re.search(
-                r"__biz=([^&]+).*?mid=(\d+).*?idx=(\d+).*?sn=([0-9a-f]+).*?chksm=([0-9a-f]+)",
-                url)
-            if m:
-                out[(m.group(1), m.group(2), m.group(3), m.group(4))] = m.group(5)
-    except Exception:
-        pass
-    _CHKSM_MAP = out
-    return out
-
-
 def ensure_chksm(url: str) -> str:
-    """URL 缺 chksm 时从缓存补上；补不上就原样返回。"""
-    if "chksm=" in url:
+    """Reuse the cache harvester; newly opened articles are visible immediately."""
+    from . import harvest
+    parsed = harvest.parse_article_url(url)
+    if not parsed or parsed["chksm"]:
         return url
-    m = re.search(r"__biz=([^&]+).*?mid=(\d+).*?idx=(\d+).*?sn=([0-9a-f]+)", url)
-    if not m:
-        return url
-    key = (m.group(1), m.group(2), m.group(3), m.group(4))
-    chksm = _load_chksm_map().get(key)
-    if not chksm:
-        return url
-    sep = "&" if "?" in url else "?"
-    return url + f"{sep}chksm={chksm}"
+    for article in harvest.harvest_articles(parsed["biz"], use_pages=False):
+        if (article.mid, article.idx, article.sn) == (parsed["mid"], parsed["idx"], parsed["sn"]) and article.chksm:
+            return url + ("&" if "?" in url else "?") + f"chksm={article.chksm}"
+    return url
 
 
 def fetch_html(url: str, session: Session | None = None, timeout: int = 25) -> str:
-    url = ensure_chksm(url)  
+    url = ensure_chksm(url)
     headers = {
         "User-Agent": FETCH_UA,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -245,7 +174,7 @@ def parse_article(html: str, url: str) -> Article:
         n = soup.select_one("#js_author_name") or soup.select_one(".rich_media_meta_text.author")
         art.author = n.get_text(strip=True) if n else ""
 
-    
+
     def _url_param(pattern: str) -> str:
         m = re.search(pattern, url)
         return m.group(1) if m else ""
@@ -292,10 +221,8 @@ def parse_article(html: str, url: str) -> Article:
 
 
 def get_article(url: str, session: Session | None = None) -> Article:
-    return parse_article(fetch_html(normalize_url(url), session), normalize_url(url))
-
-
-
+    url = normalize_url(url)
+    return parse_article(fetch_html(url, session), url)
 
 
 def download_image(url: str, referer: str = "https://mp.weixin.qq.com/") -> tuple[bytes, str]:

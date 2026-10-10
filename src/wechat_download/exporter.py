@@ -39,9 +39,11 @@ def article_dir_name(art: wechat.Article) -> str:
 
 
 def export_article(art: wechat.Article, root: Path | None = None,
-                   progress=None) -> ExportResult:
+                   progress=None, cancel_check=None) -> ExportResult:
     """把文章导出到 root/<公众号名>-<文章名>/ 下。只导出正文。"""
     root = Path(root or OUTPUT_DIR)
+    if cancel_check:
+        cancel_check()
     dir_name = article_dir_name(art)
     adir = root / dir_name
     fdir = adir / "figures"
@@ -60,14 +62,18 @@ def export_article(art: wechat.Article, root: Path | None = None,
         nonlocal failed
         if src in url_map:
             return url_map[src]
+        if cancel_check:
+            cancel_check()
         try:
             data, ext = wechat.download_image(wechat.full_size_url(src))
             fname = f"{len(url_map) + 1:02d}.{ext}"
             (fdir / fname).write_bytes(data)
             rel = f"figures/{fname}"
             files.append(fname)
-        except Exception:
+        except Exception as exc:
             failed += 1
+            if progress:
+                progress(f"图片下载失败：{exc}")
             rel = src  
         url_map[src] = rel
         return rel
@@ -97,8 +103,9 @@ def export_article(art: wechat.Article, root: Path | None = None,
         meta_bits.append(art.publish_text)
     meta_line = " ｜ ".join(meta_bits)
 
-    stem = safe_name(art.account or "公众号", 30)
-    stem += "-" + safe_name(art.title or (f"文章{art.mid}" if art.mid else "未命名文章"), 60)
+    if cancel_check:
+        cancel_check()
+    stem = dir_name
 
     html_file = adir / f"{stem}.html"
     html_file.write_text(

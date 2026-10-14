@@ -262,6 +262,44 @@ section { margin-top: 16px; }
 .fm-foot { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 14px; }
 .fm-hint { font-size: 12px; margin-right: auto; }
 
+.fm-group-save { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.fm-group-save .m-check {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12.5px; white-space: nowrap;
+}
+
+.fm-tabs { display: flex; gap: 4px; margin-bottom: 14px; border-bottom: 1px solid var(--line); }
+.fm-tab {
+  padding: 6px 14px; font-size: 13.5px; color: var(--muted); cursor: pointer;
+  background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.fm-tab:hover { color: inherit; }
+.fm-tab.active { color: var(--brand); border-bottom-color: var(--brand); font-weight: 600; }
+.fm-group-save input {
+  width: 190px; padding: 6px 10px; font-size: 13px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: inherit;
+}
+.fm-group-save button {
+  padding: 6px 12px; border-radius: 8px; font-size: 13px;
+  border: 1px solid var(--brand); background: var(--brand); color: #fff; cursor: pointer;
+}
+
+.mg-list { border: 1px solid var(--line); border-radius: 12px; padding: 4px 12px; background: var(--bg); }
+.mg-empty { padding: 16px 2px; font-size: 13px; }
+.mg-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 9px 0; border-bottom: 1px solid var(--line); cursor: pointer;
+}
+.mg-row:last-child { border-bottom: none; }
+.mg-row.mg-updated { background: color-mix(in srgb, #f5b301 10%, transparent); margin: 0 -8px; padding-left: 8px; padding-right: 8px; border-radius: 8px; }
+.mg-row.mg-updated .muted { color: var(--text); }
+.m-filter-state.mg-unread { color: #e5484d; font-weight: 600; }
+.mg-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mg-info strong { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mg-info span { font-size: 12px; }
+.mg-actions { display: flex; gap: 6px; flex: none; }
+.mg-actions button { padding: 4px 10px; font-size: 12.5px; border-radius: 8px; cursor: pointer; }
+
 .row button.qbtn {
   flex: none; width: 21px; height: 21px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;

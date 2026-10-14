@@ -90,6 +90,118 @@ class CoverageTests(unittest.TestCase):
             self.assertEqual(report["large_gap_count"], 1)
 
 
+class GroupTests(unittest.TestCase):
+    def test_sanitize_folder_name(self):
+        self.assertEqual(wxmoments.sanitize_folder_name("家人"), "家人")
+        self.assertEqual(wxmoments.sanitize_folder_name("名字 . "), "名字")
+        self.assertEqual(wxmoments.sanitize_folder_name("", "分组"), "分组")
+        cleaned = wxmoments.sanitize_folder_name('a/b:c*?"<>|')
+        self.assertTrue(cleaned)
+        self.assertFalse(any(ch in cleaned for ch in '\\/:*?"<>|'))
+
+    def test_groups_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "moments_groups.json"
+            self.assertEqual(wxmoments.load_groups(path)["groups"], [])
+            data = wxmoments.load_groups(path)
+            data["groups"].append({"id": "g1", "name": "家人", "account": "me",
+                                   "members": [{"wxid": "u1", "name": "张三"}]})
+            wxmoments.save_groups(path, data)
+            self.assertEqual(wxmoments.load_groups(path)["groups"][0]["id"], "g1")
+            # 损坏的文件按空处理，不抛错
+            path.write_text("{not json", encoding="utf-8")
+            self.assertEqual(wxmoments.load_groups(path)["groups"], [])
+
+    def test_existing_image_is_reused(self):
+        ts = datetime(2026, 1, 1, 12, 0, 0)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            post_dir = output / "figure" / wxmoments.timestamp_folder_name(ts)
+            post_dir.mkdir(parents=True)
+            (post_dir / "01.jpg").write_bytes(b"cached-image")
+            post = {"createTime": int(ts.timestamp()), "username": "friend",
+                    "contentDesc": "x", "media": [{"type": wxmoments.MEDIA_TYPE_IMAGE}]}
+            account = wxmoments.AccountInfo("self", Path("synthetic"), Path("synthetic/db"))
+
+            async def boom(*args, **kwargs):
+                raise AssertionError("已有图片不应重新下载")
+
+            with patch.object(wxmoments, "choose_image", boom):
+                stats, _ = asyncio.run(wxmoments.export_markdown(
+                    account, output, output, None, None, None, {}, False, {},
+                    allow_download=True, posts_override=[post], reuse_existing=True))
+            self.assertEqual(stats["reused_images"], 1)
+            md = (output / "moments.md").read_text(encoding="utf-8")
+            self.assertIn("figure/20260101_120000/01.jpg", md)
+
+    def test_stable_post_dir_reused_between_runs(self):
+        ts = datetime(2026, 1, 1, 12, 0, 0)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            post_dir = output / "figure" / wxmoments.timestamp_folder_name(ts)
+            post_dir.mkdir(parents=True)
+            (post_dir / "01.jpg").write_bytes(b"cached-image")
+            account = wxmoments.AccountInfo("self", Path("synthetic"), Path("synthetic/db"))
+            post = {"createTime": int(ts.timestamp()), "username": "friend",
+                    "contentDesc": "x", "media": [{"type": wxmoments.MEDIA_TYPE_IMAGE}]}
+            for _ in range(2):
+                asyncio.run(wxmoments.export_markdown(
+                    account, output, output, None, None, None, {}, False, {},
+                    allow_download=False, posts_override=[post], reuse_existing=True))
+            dirs = sorted(p.name for p in (output / "figure").iterdir() if p.is_dir())
+            self.assertEqual(dirs, ["20260101_120000"])
+
+
+class GroupExportTests(unittest.TestCase):
+    """拆分 / 组合两种分组导出模式。"""
+
+    def _run_group(self, split, directory):
+        timestamp = datetime(2026, 1, 1, 12, 0, 0).timestamp()
+        posts = [
+            {"createTime": int(timestamp), "username": "u1", "contentDesc": "a", "media": []},
+            {"createTime": int(timestamp) + 60, "username": "u1", "contentDesc": "b", "media": []},
+            {"createTime": int(timestamp) + 120, "username": "u2", "contentDesc": "c", "media": []},
+        ]
+        tmp = Path(directory)
+        account = wxmoments.AccountInfo("acct", Path("synthetic"), Path("synthetic/db"))
+        state = {"account_info": account, "account_dir": tmp, "posts": posts,
+                 "self_variants": set(), "contact_names": {"u1": "张三", "u2": "李四"}}
+        group = {"id": "g1", "name": "家人", "folder": "家人", "split": split,
+                 "keep_interactions": False,
+                 "members": [{"wxid": "u1"}, {"wxid": "u2"}, {"wxid": "u3"}]}
+
+        async def noop(*args, **kwargs):
+            return None
+
+        with patch.object(server, "_moments_config", lambda: {"output_root": str(tmp)}), \
+                patch.object(server, "_MOMENTS", state), \
+                patch.object(server, "_touch_group_export", lambda *args: None), \
+                patch.object(wxmoments, "save_image_keys", noop), \
+                patch.object(wxmoments, "render_pdf", lambda *args, **kwargs: None):
+            job = Job(1)
+            server._run_moments_group(job, account, tmp, group, "家人")
+        return job, tmp / "家人"
+
+    def test_split_writes_one_folder_per_friend(self):
+        with tempfile.TemporaryDirectory() as directory:
+            job, group_dir = self._run_group(True, directory)
+            self.assertEqual(job.status, "done")
+            self.assertTrue((group_dir / "张三" / "moments.md").exists())
+            self.assertTrue((group_dir / "李四" / "moments.md").exists())
+            self.assertFalse((group_dir / "moments.md").exists())
+            self.assertFalse((group_dir / "王五").exists())
+
+    def test_combined_writes_single_document(self):
+        with tempfile.TemporaryDirectory() as directory:
+            job, group_dir = self._run_group(False, directory)
+            self.assertEqual(job.status, "done")
+            self.assertTrue((group_dir / "moments.md").exists())
+            self.assertFalse((group_dir / "张三").exists())
+            md = (group_dir / "moments.md").read_text(encoding="utf-8")
+            self.assertIn("张三", md)
+            self.assertIn("李四", md)
+
+
 class DecryptScopeTests(unittest.TestCase):
     def test_optional_scope_skips_unrelated_databases(self):
         names = ["sns.db", "contact.db", "media_0.db", "message_0.db"]
@@ -233,11 +345,11 @@ class JobTests(unittest.TestCase):
         cursor = diagnostics()["cursor"]
         logger = logging.getLogger("regression")
         logger.warning("[decrypt.wal_merge] rejected after quick_check db=media_0.db")
-        logger.warning("internal detail", extra={"browser_notice": "请稍后重新解密。"})
+        logger.warning("internal detail", extra={"browser_notice": "请稍后刷新。"})
         events = diagnostics(cursor)["events"]
         self.assertIn("quick_check", events[0]["message"])
         self.assertEqual(events[0]["notice"], "")
-        self.assertEqual(events[1]["notice"], "请稍后重新解密。")
+        self.assertEqual(events[1]["notice"], "请稍后刷新。")
 
     def test_background_logs_are_isolated_and_console_is_clean(self):
         barrier = threading.Barrier(2)
@@ -422,19 +534,22 @@ class LauncherTests(unittest.TestCase):
             source = (server.SRC_DIR / "launch.ps1").read_text(encoding="utf-8-sig")
             source = source.replace("$PythonExe = Join-Path $VenvDir 'Scripts\\python.exe'",
                                     "$PythonExe = '" + sys.executable.replace("'", "''") + "'")
-            source = "function Invoke-RestMethod { throw 'offline fixture' }\nfunction Start-Process {}\n" + source
             (project / "src/launch.ps1").write_text(source, encoding="utf-8-sig")
             (project / "src/server.py").write_text(code, encoding="utf-8")
+            env = dict(os.environ)
+            env["WXMOMENTS_NO_BROWSER"] = "1"
             result = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                                     "-File", str(project / "src/launch.ps1")], capture_output=True, timeout=20)
+                                     "-File", str(project / "src/launch.ps1")],
+                                    capture_output=True, timeout=20, env=env)
             page = project / "runtime/startup-error.html"
             return result, page.read_text(encoding="utf-8") if page.exists() else ""
 
     def test_nonfatal_stderr_stays_out_of_terminal(self):
         result, page = self._launch("import sys\nprint('normal output')\nsys.stderr.write('nonfatal warning\\n')\n")
-        self.assertEqual(result.returncode, 0, result.stderr)
+        # 服务进程立即退出（未监听端口）→ 判定启动失败；stderr 细节进错误页文件，不进终端。
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(result.stdout + result.stderr, b"")
-        self.assertEqual(page, "")
+        self.assertIn("nonfatal warning", page)
 
     def test_startup_crash_creates_browser_error_page(self):
         result, page = self._launch("import sys\nsys.stderr.write('fixture failure\\n')\nsys.exit(3)\n")

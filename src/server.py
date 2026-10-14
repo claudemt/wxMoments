@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
 import base64
 import webbrowser
@@ -162,6 +163,8 @@ async def api_export(payload: dict):
         return _start_author_export(payload)
     if kind == "moments":
         return _start_moments_export(payload)
+    if kind == "moments_group":
+        return _start_moments_group_export(payload)
     return JSONResponse({"ok": False, "msg": "未知的导出类型"}, status_code=400)
 
 
@@ -202,7 +205,7 @@ def _start_moments_export_locked(payload: dict) -> dict:
         account_info = _MOMENTS.get("account_info")
         account_dir = _MOMENTS.get("account_dir")
         if not account_info or not account_dir:
-            return {"ok": False, "msg": "请先点击「重新解密」"}
+            return {"ok": False, "msg": "请先点击「刷新」"}
         account_dir = Path(account_dir)
 
         usernames, start, end = _parse_moments_filters(payload)
@@ -232,6 +235,40 @@ def _start_moments_export_locked(payload: dict) -> dict:
         return {"ok": False, "msg": str(exc)}
 
 
+def _start_moments_group_export(payload: dict) -> dict:
+    with _INIT_LOCK:
+        return _start_moments_group_export_locked(payload)
+
+
+def _start_moments_group_export_locked(payload: dict) -> dict:
+    """按分组导出：每位好友一个子文件夹，写进固定的 output/组名/ 。"""
+    global _MOMENTS_EXPORT_JOB
+    if _INIT_JOB and _INIT_JOB.status == "running":
+        return {"ok": False, "msg": "正在解密，请等待完成后再导出"}
+    if _MOMENTS_EXPORT_JOB and _MOMENTS_EXPORT_JOB.status == "running":
+        return {"ok": False, "msg": "已有朋友圈导出任务，请等待完成或取消"}
+    try:
+        account_info = _MOMENTS.get("account_info")
+        account_dir = _MOMENTS.get("account_dir")
+        if not account_info or not account_dir:
+            return {"ok": False, "msg": "请先点击「刷新」"}
+
+        gid = str(payload.get("id") or "").strip()
+        group = next((g for g in _group_records() if g.get("id") == gid), None)
+        if group is None:
+            return {"ok": False, "msg": "分组不存在，请重新保存"}
+        if not group.get("members"):
+            return {"ok": False, "msg": "该分组没有好友"}
+
+        folder = str(group.get("folder") or "") or (
+            "朋友圈-" + wxmoments.sanitize_folder_name(str(group.get("name") or "")))
+        job = start_job(1, _run_moments_group, account_info, Path(account_dir), group, folder)
+        _MOMENTS_EXPORT_JOB = job
+        return {"ok": True, "job": job.id, "dir": str(_output_root() / folder)}
+    except Exception as exc:
+        return {"ok": False, "msg": str(exc)}
+
+
 def _run_single(job: Job, art: wechat.Article) -> None:
     try:
         job.message = art.title
@@ -257,7 +294,7 @@ HARVEST_TIP = (
     "微信缓存里还没有这个公众号的文章记录。\n"
     "请在微信里打开该公众号的「历史消息」页，把里面的每一篇文章都点开一遍"
     "（点开即可，可以立刻按 Ctrl+W 关掉）。\n"
-    "这边会自动收录，下面列表会实时变多，点完直接勾选下载。"
+    "这边会自动收录，列表实时变多，点完直接勾选下载。"
 )
 
 
@@ -412,6 +449,62 @@ def _moments_config() -> dict[str, Any]:
     return wxmoments.load_config(wxmoments.DEFAULT_CONFIG)
 
 
+def _output_root() -> Path:
+    config = _moments_config()
+    return Path(
+        str(config.get("output_root") or "") or (BASE_DIR / "output")
+    ).expanduser()
+
+
+def _groups_path() -> Path:
+    return _output_root() / "moments_groups.json"
+
+
+def _current_account() -> str:
+    ai = _MOMENTS.get("account_info")
+    return ai.account if ai else ""
+
+
+def _group_records() -> list[dict[str, Any]]:
+    data = wxmoments.load_groups(_groups_path())
+    account = _current_account()
+    return [g for g in data["groups"]
+            if isinstance(g, dict) and str(g.get("account") or "") == account]
+
+
+def _save_group_records(records: list[dict[str, Any]]) -> None:
+    """按账号整体替换：保留其他账号的分组。"""
+    data = wxmoments.load_groups(_groups_path())
+    account = _current_account()
+    others = [g for g in data["groups"]
+              if not (isinstance(g, dict) and str(g.get("account") or "") == account)]
+    data["groups"] = others + records
+    wxmoments.save_groups(_groups_path(), data)
+
+
+def _touch_group_export(group_id: str) -> None:
+    records = _group_records()
+    for g in records:
+        if g.get("id") == group_id:
+            g["last_export"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            g["last_seen_posts"] = _group_total_posts(g)
+            break
+    else:
+        return
+    _save_group_records(records)
+
+
+def _group_total_posts(group: dict) -> int:
+    total = 0
+    for m in group.get("members") or []:
+        if not isinstance(m, dict):
+            continue
+        wxid = str(m.get("wxid") or "").strip()
+        if wxid:
+            total += len(_moments_filtered_posts([wxid], None, None))
+    return total
+
+
 def _moments_acquire_key(account_info: wxmoments.AccountInfo) -> str:
     """网页版密钥获取：config → 本地已存 → 自动读取（微信须已登录前台）。"""
     config = _moments_config()
@@ -502,7 +595,7 @@ def _run_moments_init(job: Job) -> None:
 def _moments_ready() -> Path:
     account_dir = _MOMENTS.get("account_dir")
     if not account_dir:
-        raise RuntimeError("请先点击「重新解密」")
+        raise RuntimeError("请先点击「刷新」")
     return Path(account_dir)
 
 
@@ -552,7 +645,7 @@ async def api_moments_status():
 async def api_moments_contacts(payload: dict):
     """好友列表 = 本机朋友圈数据里实际出现过的用户（仅聊天/无数据者不出现）。"""
     try:
-        account_dir = _moments_ready()
+        _moments_ready()
         contacts = _MOMENTS.get("contacts") or []
         posts = _MOMENTS.get("posts") or []
         ai = _MOMENTS.get("account_info")
@@ -580,6 +673,125 @@ async def api_moments_contacts(payload: dict):
                 out.append({"wxid": u, "nickname": info[1], "remark": info[0], "privacy": info[2]})
 
         return {"ok": True, "contacts": out}
+    except Exception as exc:
+        return {"ok": False, "msg": str(exc)}
+
+
+def _group_view(record: dict[str, Any]) -> dict[str, Any]:
+    """给前端的展示数据：成员补上当前显示名，附上条数与未读新条数。"""
+    names = _contact_names()
+    members = []
+    for m in record.get("members") or []:
+        if not isinstance(m, dict):
+            continue
+        wxid = str(m.get("wxid") or "").strip()
+        if not wxid:
+            continue
+        members.append({"wxid": wxid, "name": names.get(wxid) or m.get("name") or wxid})
+    total = _group_total_posts(record)
+    return {
+        "id": str(record.get("id") or ""),
+        "name": str(record.get("name") or ""),
+        "folder": str(record.get("folder") or ""),
+        "keep_interactions": bool(record.get("keep_interactions")),
+        "split": bool(record.get("split", False)),
+        "members": members,
+        "total_posts": total,
+        "new_posts": max(0, total - int(record.get("last_seen_posts") or 0)),
+        "last_export": str(record.get("last_export") or ""),
+    }
+
+
+@app.post("/api/moments/groups")
+async def api_moments_groups(payload: dict):
+    """列出当前账号保存的好友分组。"""
+    try:
+        return {"ok": True, "groups": [_group_view(g) for g in _group_records()]}
+    except Exception as exc:
+        return {"ok": False, "msg": str(exc)}
+
+
+@app.post("/api/moments/groups/save")
+async def api_moments_groups_save(payload: dict):
+    """新建或更新一个分组（带 id 即更新）。"""
+    try:
+        if not _current_account():
+            return {"ok": False, "msg": "请先点击「刷新」"}
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return {"ok": False, "msg": "请填写分组名称"}
+        usernames = payload.get("usernames") or []
+        if not isinstance(usernames, list) or not all(isinstance(u, str) for u in usernames):
+            return {"ok": False, "msg": "好友选择无效"}
+        usernames = [u.strip() for u in usernames if str(u).strip()]
+        if not usernames:
+            return {"ok": False, "msg": "请至少选择一位好友"}
+        names = _contact_names()
+
+        records = _group_records()
+        gid = str(payload.get("id") or "").strip()
+        target = next((g for g in records if g.get("id") == gid), None) if gid else None
+        if gid and target is None:
+            return {"ok": False, "msg": "分组不存在，可能已被删除"}
+        if target is None:
+            target = {
+                "id": uuid.uuid4().hex[:12],
+                "account": _current_account(),
+                "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "last_export": "",
+            }
+            records.append(target)
+        target["name"] = name
+        folder = "朋友圈-" + wxmoments.sanitize_folder_name(name)
+        clash = next((g for g in records if g is not target and g.get("folder") == folder), None)
+        if clash:
+            return {"ok": False,
+                    "msg": f"已有分组「{clash.get('name')}」用同一个导出文件夹「{folder}」，请换个名字"}
+        target["folder"] = folder
+        target["keep_interactions"] = bool(payload.get("keep_interactions"))
+        # 默认「组合」：整组一份；勾选「拆分」才每位好友一个子文件夹。
+        split = payload.get("split")
+        target["split"] = False if split is None else bool(split)
+        target["members"] = [{"wxid": u, "name": names.get(u) or u} for u in usernames]
+        # 保存/编辑即视为已读：记录当前条数快照，之后新增的朋友圈才会提示「新 N 条」。
+        target["last_seen_posts"] = _group_total_posts(target)
+        _save_group_records(records)
+        return {"ok": True, "group": _group_view(target)}
+    except Exception as exc:
+        return {"ok": False, "msg": str(exc)}
+
+
+@app.post("/api/moments/groups/seen")
+async def api_moments_groups_seen(payload: dict):
+    """把分组标记为已读：记录当前条数快照，之后的新朋友圈重新计为「新」。"""
+    try:
+        gid = str(payload.get("id") or "").strip()
+        if not gid:
+            return {"ok": False, "msg": "缺少分组 ID"}
+        records = _group_records()
+        for g in records:
+            if g.get("id") == gid:
+                g["last_seen_posts"] = _group_total_posts(g)
+                break
+        else:
+            return {"ok": False, "msg": "分组不存在"}
+        _save_group_records(records)
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "msg": str(exc)}
+
+
+@app.post("/api/moments/groups/delete")
+async def api_moments_groups_delete(payload: dict):
+    """删除分组记录；磁盘上已导出的文件夹保留。"""
+    try:
+        gid = str(payload.get("id") or "").strip()
+        records = _group_records()
+        kept = [g for g in records if g.get("id") != gid]
+        if len(kept) == len(records):
+            return {"ok": False, "msg": "分组不存在"}
+        _save_group_records(kept)
+        return {"ok": True}
     except Exception as exc:
         return {"ok": False, "msg": str(exc)}
 
@@ -645,7 +857,7 @@ async def api_contacts_export(payload: dict):
 @app.post("/api/moments/timeline")
 async def api_moments_timeline(payload: dict):
     try:
-        account_dir = _moments_ready()
+        _moments_ready()
         usernames, start, end = _parse_moments_filters(payload)
         posts = _moments_filtered_posts(usernames, start, end)
         names = _contact_names()
@@ -766,9 +978,7 @@ def _run_moments(job: Job, account_info: wxmoments.AccountInfo,
     """朋友圈导出后台任务：图片密钥 → 逐条导出（进度）→ 生成 PDF。"""
     try:
         config = _moments_config()
-        output_root = Path(
-            str(config.get("output_root") or "") or (BASE_DIR / "output")
-        ).expanduser()
+        output_root = _output_root()
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         output = output_root / f"朋友圈-{ts}"
         output.mkdir(parents=True, exist_ok=True)
@@ -830,6 +1040,145 @@ def _run_moments(job: Job, account_info: wxmoments.AccountInfo,
         job.message = f"完成：{output.name}（{stats['posts']} 条）"
         if stats["missing_images"]:
             job.message += f"，{stats['missing_images']} 张图片缺失"
+        job.finish("done", job.message)
+    except Exception as exc:
+        job.finish("canceled" if job.canceled else "error",
+                   "已取消" if job.canceled else f"导出失败：{exc}")
+
+
+def _unique_member_dir(group_dir: Path, display: str, wxid: str,
+                       used: dict[str, str]) -> Path:
+    """组内每位好友一个子目录；重名时追加编号，避免互相覆盖。"""
+    base = wxmoments.sanitize_folder_name(display or wxid, fallback=wxid or "好友")
+    name = base
+    index = 2
+    while name in used:
+        name = f"{base}_{index:02d}"
+        index += 1
+    used[name] = wxid
+    return group_dir / name
+
+
+def _export_group_dir(job: Job, account_info: wxmoments.AccountInfo, account_dir: Path,
+                      config: dict[str, Any], contact_names: dict[str, str], out_dir: Path,
+                      posts: list[dict[str, Any]], usernames: list[str],
+                      keep_interactions: bool, label: str,
+                      base_done: int, grand_total: int) -> dict[str, Any]:
+    """把 posts 导出到 out_dir（md/html/pdf/下载报告），就地复用已有图片。"""
+    from wechat_decrypt_tool.modules.sns_media import (
+        reset_sns_download_report, sns_download_report,
+    )
+    reset_sns_download_report()
+
+    def cb(idx: int, _total: int, who: str, time_text: str) -> None:
+        if job.canceled:
+            raise RuntimeError("已取消")
+        job.done = base_done + idx
+        job.message = f"({job.done}/{grand_total}) {time_text} {who}"
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stats, exported = asyncio.run(wxmoments.export_markdown(
+        account_info, account_dir, out_dir, None, None, usernames, config,
+        keep_interactions, contact_names,
+        allow_download=True, progress_cb=cb, posts_override=posts,
+        coverage_posts=_MOMENTS.get("posts") or [], reuse_existing=True,
+    ))
+    job.done = base_done + len(posts)
+
+    job.check_canceled()
+    job.message = f"生成 {label} 的 PDF…"
+    try:
+        wxmoments.write_pdf_html(out_dir, exported)
+        wxmoments.render_pdf(out_dir, exported, out_dir / "moments.pdf")
+    except Exception as exc:
+        job.add_log(f"{label}：PDF 生成失败（HTML 仍可用）：{exc}")
+
+    report = sns_download_report()
+    (out_dir / "download_report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    job.add_log(
+        f"{label}：{stats['posts']} 条，图片 {stats['images']} "
+        f"（复用 {stats.get('reused_images', 0)}），缺失 {stats['missing_images']}"
+    )
+    return stats
+
+
+def _run_moments_group(job: Job, account_info: wxmoments.AccountInfo,
+                       account_dir: Path, group: dict[str, Any],
+                       folder: str) -> None:
+    """分组导出到 output/<组名>/：拆分＝每位好友一个子文件夹，组合＝整组一份。"""
+    try:
+        config = _moments_config()
+        group_dir = _output_root() / folder
+        group_dir.mkdir(parents=True, exist_ok=True)
+        job.add_log(f"输出目录：{group_dir}")
+
+        job.check_canceled()
+        job.message = "准备图片密钥…"
+        asyncio.run(wxmoments.save_image_keys(
+            account_info.account, account_info.wxid_dir, account_info.db_storage_dir))
+
+        contact_names = _contact_names()
+        keep_interactions = bool(group.get("keep_interactions"))
+        split = bool(group.get("split", False))
+
+        plans: list[tuple[str, str, list[dict[str, Any]]]] = []
+        for member in group.get("members") or []:
+            wxid = str(member.get("wxid") or "").strip() if isinstance(member, dict) else ""
+            if not wxid:
+                continue
+            display = contact_names.get(wxid) or wxid
+            posts = _moments_filtered_posts([wxid], None, None)
+            if not posts:
+                job.add_log(f"{display}：没有可导出的朋友圈，跳过")
+                continue
+            plans.append((wxid, display, posts))
+        if not plans:
+            job.finish("error", "该分组的好友都没有可导出的朋友圈")
+            return
+
+        total = sum(len(posts) for _, _, posts in plans)
+        job.total = total
+
+        if split:
+            used_dirs: dict[str, str] = {}
+            done = 0
+            for wxid, display, posts in plans:
+                job.check_canceled()
+                member_dir = _unique_member_dir(group_dir, display, wxid, used_dirs)
+                _export_group_dir(
+                    job, account_info, account_dir, config, contact_names, member_dir,
+                    posts, [wxid], keep_interactions, display, done, total)
+                done += len(posts)
+        else:
+            merged = [post for _, _, posts in plans for post in posts]
+            merged.sort(key=lambda item: int(item.get("createTime") or 0), reverse=True)
+            _export_group_dir(
+                job, account_info, account_dir, config, contact_names, group_dir,
+                merged, [wxid for wxid, _, _ in plans], keep_interactions,
+                "全部好友", 0, total)
+
+        exported_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        (group_dir / "group.json").write_text(json.dumps({
+            "name": str(group.get("name") or ""),
+            "folder": folder,
+            "split": split,
+            "keep_interactions": keep_interactions,
+            "exported_at": exported_at,
+            "members": [
+                {"wxid": wxid, "name": display, "posts": len(posts)}
+                for wxid, display, posts in plans
+            ],
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        _touch_group_export(str(group.get("id") or ""))
+
+        job.results.append({
+            "dir": str(group_dir),
+            "posts": total,
+            "members": len(plans),
+        })
+        mode = "拆分" if split else "组合"
+        job.message = f"完成：{folder}（{len(plans)} 位好友 · {mode} · {total} 条）"
         job.finish("done", job.message)
     except Exception as exc:
         job.finish("canceled" if job.canceled else "error",

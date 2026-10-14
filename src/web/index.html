@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>微信数据导出工具</title>
-<link rel="stylesheet" href="/static/style.css?v=23">
+<link rel="stylesheet" href="/static/style.css?v=27">
 </head>
 <body>
 <div class="app">
@@ -148,23 +148,40 @@
         <button class="fm-close" id="fm-close" title="关闭">✕</button>
       </div>
 
-      <div class="fm-dates">
-        <label>开始 <input type="date" id="m-start"></label>
-        <label>结束 <input type="date" id="m-end"></label>
-        <label class="m-check"><input type="checkbox" id="m-keep"> 保留点赞评论</label>
+      <div class="fm-tabs">
+        <button class="fm-tab active" id="fm-tab-friends">好友</button>
+        <button class="fm-tab" id="fm-tab-groups">分组<span class="m-filter-state" id="m-groups-count"></span></button>
       </div>
 
-      <div class="m-friends-head">
-        <input id="m-friend-search" type="text" spellcheck="false"
-               placeholder="搜索好友">
-        <span class="muted" id="m-friend-count"></span>
-        <button id="m-friend-all">全选</button>
-        <button id="m-friend-clear">清空</button>
+      <div id="fm-pane-friends">
+        <div class="fm-dates">
+          <label>开始 <input type="date" id="m-start"></label>
+          <label>结束 <input type="date" id="m-end"></label>
+          <label class="m-check"><input type="checkbox" id="m-keep"> 保留点赞评论</label>
+          <label class="m-check"><input type="checkbox" id="m-group-split"> 拆分</label>
+        </div>
+
+        <div class="m-friends-head">
+          <input id="m-friend-search" type="text" spellcheck="false"
+                 placeholder="搜索好友">
+          <span class="muted" id="m-friend-count"></span>
+          <button id="m-friend-all">全选</button>
+          <button id="m-friend-clear">清空</button>
+        </div>
+        <div class="m-friend-list" id="m-friend-list"></div>
+
+        <div class="fm-group-save">
+          <input id="m-group-name" type="text" spellcheck="false" maxlength="40"
+                 placeholder="把当前勾选存为分组，例如：家人">
+          <button id="m-group-save">保存为分组</button>
+        </div>
       </div>
-      <div class="m-friend-list" id="m-friend-list"></div>
+
+      <div id="fm-pane-groups" hidden>
+        <div class="mg-list" id="m-groups-list"></div>
+      </div>
 
       <div class="fm-foot">
-        <span class="muted fm-hint">改动立即生效</span>
         <button class="primary" id="fm-apply">完成</button>
       </div>
     </div>
@@ -206,6 +223,6 @@
   </div>
 </div>
 <script src="/static/floating.js?v=1"></script>
-<script src="/static/app.js?v=34"></script>
+<script src="/static/app.js?v=39"></script>
 </body>
 </html>

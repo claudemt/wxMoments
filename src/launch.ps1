@@ -15,8 +15,6 @@ $env:WXMOMENTS_RUNTIME_DIR = $RuntimeDir
 $env:WECHAT_TOOL_ENABLE_CONSOLE_LOG = '0'
 
 function Invoke-Native([scriptblock]$Command) {
-    # Windows PowerShell treats native stderr as ErrorRecord; retain it in the
-    # log and decide success from the exit code rather than from stderr output.
     $ErrorActionPreference = 'Continue'
     & $Command
     $script:RuntimeExitCode = $LASTEXITCODE
@@ -43,18 +41,43 @@ a{color:#07a854}</style><h1>wxMoments 启动未完成</h1><p>$SafeMessage</p>
 <details open><summary>启动记录</summary><pre>$SafeDetails</pre></details></html>
 "@
     [IO.File]::WriteAllText($ErrorPage, $Page, [Text.UTF8Encoding]::new($false))
-    Start-Process -FilePath $ErrorPage
+    if (-not $env:WXMOMENTS_NO_BROWSER) {
+        Start-Process -FilePath $ErrorPage
+    }
+}
+
+function Test-ServiceUp {
+    try {
+        $Client = [Net.Sockets.TcpClient]::new()
+        try {
+            $Client.Connect('127.0.0.1', 8756)
+            return $Client.Connected
+        } finally {
+            $Client.Dispose()
+        }
+    } catch {
+        return $false
+    }
+}
+
+function Stop-PortListener([int]$Port) {
+    $Listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $Listener) { return }
+    Stop-Process -Id $Listener.OwningProcess -Force -ErrorAction SilentlyContinue
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -Milliseconds 250
+        if (-not (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)) { break }
+    }
+    if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
+        throw '旧服务未能停止，请手动结束占用 8756 端口的进程后重试。'
+    }
 }
 
 try {
     [IO.Directory]::CreateDirectory($RuntimeDir) | Out-Null
-    try {
-        $Status = Invoke-RestMethod -Uri 'http://127.0.0.1:8756/api/moments/status' -TimeoutSec 2
-        if ($Status.ok -eq $true -and $null -ne $Status.ready) {
-            Start-Process 'http://127.0.0.1:8756/'
-            exit 0
-        }
-    } catch { }
+    # 每次双击都停掉旧服务再启动：保证代码改动一定生效。
+    Stop-PortListener 8756
     $ConfigPath = Join-Path $ProjectDir 'config\config.json'
     if (-not (Test-Path -LiteralPath $ConfigPath)) {
         Copy-Item -LiteralPath (Join-Path $ProjectDir 'config\config.example.json') -Destination $ConfigPath
@@ -91,8 +114,21 @@ try {
         if ($RuntimeExitCode -ne 0) { throw '依赖检查失败，请查看安装记录。' }
         [IO.File]::WriteAllText($DependencyStamp, $Fingerprint)
     }
-    Invoke-Native { & $PythonExe (Join-Path $PSScriptRoot 'server.py') 1> $ServerOutLog 2> $ServerErrorLog }
-    if ($RuntimeExitCode -ne 0) { throw '本地服务启动或运行失败，请查看运行记录。' }
+    # 独立进程启动服务，不随本窗口退出而结束；窗口只负责调度与验证。
+    $ServerProc = Start-Process -FilePath $PythonExe -ArgumentList (Join-Path $PSScriptRoot 'server.py') `
+        -WorkingDirectory $ProjectDir -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput $ServerOutLog -RedirectStandardError $ServerErrorLog
+    $Up = $false
+    for ($i = 0; $i -lt 120; $i++) {
+        if (Test-ServiceUp) { $Up = $true; break }
+        if ($ServerProc.HasExited) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $Up) {
+        throw '本地服务启动失败，请查看运行记录。'
+    }
+    # 浏览器由 server.py 在服务就绪后自动打开，这里只提示地址。
+    Write-Host 'Open in browser: http://127.0.0.1:8756/'
     exit 0
 } catch {
     Show-StartupError $_.Exception.Message @($InstallLog, $ServerOutLog, $ServerErrorLog)

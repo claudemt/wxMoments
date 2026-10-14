@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import argparse
-import asyncio
 import contextlib
-import csv
 import hashlib
 import html
 import json
@@ -72,21 +69,6 @@ class ContactEntry:
     source_table: str = ""
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="导出微信朋友圈为 Markdown、HTML 和 PDF")
-    parser.add_argument("--key", default="", help=argparse.SUPPRESS)
-    parser.add_argument("--start", default="", help="起始时间，例如 20260606；留空表示不限制")
-    parser.add_argument("--end", default="", help="终止时间，例如 20260606；留空表示不限制")
-    parser.add_argument("--only-self", default="", help="是否只导出自己的朋友圈: y/n，默认 y")
-    parser.add_argument("--keep-interactions", default="", help="是否保留点赞评论: y/n，默认 n")
-    parser.add_argument("--export-contacts", default="", help="是否导出好友列表: y/n，默认 n")
-    parser.add_argument("--config", default=str(DEFAULT_CONFIG), help=argparse.SUPPRESS)
-    parser.add_argument("--output-root", default="", help=argparse.SUPPRESS)
-    parser.add_argument("--no-download", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
-    return parser.parse_args()
-
-
 def load_config(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -104,31 +86,46 @@ def save_config(path: Path, config: dict[str, Any]) -> None:
     path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+GROUPS_VERSION = 1
+_ILLEGAL_FOLDER_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def sanitize_folder_name(value: str, fallback: str = "分组") -> str:
+    """把分组名转成 Windows 可用的目录名（非法字符、结尾的点与空格一律去掉）。"""
+    name = _ILLEGAL_FOLDER_CHARS.sub("_", str(value or "").strip())
+    name = name.rstrip(" .")
+    return name or fallback
+
+
+def load_groups(path: Path) -> dict[str, Any]:
+    """读取分组存储，文件缺失或损坏时返回空结构，不抛错。"""
+    if not path.exists():
+        return {"version": GROUPS_VERSION, "groups": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        logger.warning("分组文件读取失败，按空处理：%s: %s", path, exc)
+        return {"version": GROUPS_VERSION, "groups": []}
+    if not isinstance(data, dict) or not isinstance(data.get("groups"), list):
+        return {"version": GROUPS_VERSION, "groups": []}
+    data["version"] = int(data.get("version") or GROUPS_VERSION)
+    return data
+
+
+def save_groups(path: Path, data: dict[str, Any]) -> None:
+    """原子写入分组存储，避免中途失败留下半个文件。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(data, ensure_ascii=False, indent=2)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def ensure_imports() -> None:
     if (SRC_ROOT / "wechat_decrypt_tool").exists():
         sys.path.insert(0, str(SRC_ROOT))
         return
     raise FileNotFoundError("缺少 src/wechat_decrypt_tool，请确认项目文件完整")
-
-
-def ask_input(value: str, label: str, default: str = "") -> str:
-    if value:
-        return value.strip()
-    suffix = f" [{default}]" if default else ""
-    return input(f"{label}{suffix}: ").strip() or default
-
-
-def print_input_rules() -> None:
-    print(
-        "\n输入规则：\n"
-        "- 时间格式示例：20260606 或 2026-06-06；直接回车表示不限制。\n"
-        "- 是否只导出自己的朋友圈：请输入 y 或 n；直接回车表示 y。\n"
-        "- 是否保留点赞评论：请输入 y 或 n；直接回车表示 n。\n"
-        "- 是否导出好友列表：请输入 y 或 n；直接回车表示 n。\n"
-        "- 如果选择 n，可以继续按好友备注或昵称筛选。\n"
-        "- 好友筛选：第1位直接回车表示导出所有人；输入 /me 表示自己；输入 /enough 表示结束选择。\n",
-        flush=True,
-    )
 
 
 def parse_datetime(value: str, *, end_of_day: bool) -> datetime | None:
@@ -144,28 +141,6 @@ def parse_datetime(value: str, *, end_of_day: bool) -> datetime | None:
         except ValueError:
             continue
     raise ValueError(f"时间格式不正确: {raw}。示例: 20260606 或 2026-06-06")
-
-
-def parse_yes_no(value: str) -> bool:
-    raw = str(value or "").strip().lower()
-    if not raw:
-        return True
-    if raw in {"y", "yes", "1", "true", "on"}:
-        return True
-    if raw in {"n", "no", "0", "false", "off"}:
-        return False
-    raise ValueError("只导出自己的朋友圈请输入 y 或 n")
-
-
-def parse_yes_no_default_no(value: str) -> bool:
-    raw = str(value or "").strip().lower()
-    if not raw:
-        return False
-    if raw in {"y", "yes", "1", "true", "on"}:
-        return True
-    if raw in {"n", "no", "0", "false", "off"}:
-        return False
-    raise ValueError("请输入 y 或 n")
 
 
 def clean_account_name(path_name: str) -> str:
@@ -375,63 +350,6 @@ def find_account(config: dict[str, Any]) -> AccountInfo:
     return max(candidates, key=lambda item: item[0])[1]
 
 
-def _normalize_pasted_path(value: str) -> Path:
-    raw = str(value or "").strip().strip('"').strip("'")
-    if raw.startswith("& "):
-        raw = raw[2:].strip().strip('"').strip("'")
-    raw = os.path.expandvars(raw)
-    path = Path(raw).expanduser()
-    if path.is_file() and path.name.lower() == "sns.db":
-        path = path.parent
-    return path
-
-
-def find_account_with_interactive_retry(
-    config: dict[str, Any],
-    config_path: Path,
-    original_error: FileNotFoundError,
-) -> AccountInfo:
-    print(f"\n{original_error}", flush=True)
-    print(
-        "\n自动定位失败，但可以现场补救：\n"
-        "1. 打开电脑版微信 → 设置 → 文件管理 → 打开文件夹。\n"
-        "2. 把打开的文件夹路径复制/拖入到这里。\n"
-        "3. 也可以直接粘贴包含 wxid_xxxxx 或 db_storage 的目录。\n"
-        "直接回车则退出。\n",
-        flush=True,
-    )
-
-    while True:
-        raw = input("请输入微信数据目录路径: ").strip()
-        if not raw:
-            raise original_error
-        candidate = _normalize_pasted_path(raw)
-        if not candidate.exists():
-            print(f"这个路径不存在：{candidate}", flush=True)
-            continue
-
-        trial_config = dict(config)
-        trial_config["wechat_data_root"] = str(candidate)
-        try:
-            account_info = find_account(trial_config)
-        except FileNotFoundError:
-            print(
-                "这个路径里仍然没有找到朋友圈数据库 sns.db。请尝试上一级目录、"
-                "WeChat Files / xwechat_files 目录，或直接搜索 sns.db 后粘贴其所在目录。",
-                flush=True,
-            )
-            continue
-
-        config["wechat_data_root"] = str(candidate)
-        save_config(config_path, config)
-        print(
-            f"已找到账号目录：{account_info.wxid_dir}\n"
-            f"已保存 wechat_data_root 到：{config_path}",
-            flush=True,
-        )
-        return account_info
-
-
 def is_wechat_running() -> bool:
     try:
         import psutil
@@ -467,31 +385,6 @@ def load_saved_db_key(account_info: AccountInfo) -> str:
         if re.fullmatch(rf"[0-9a-fA-F]{{{DB_KEY_HEX_LENGTH}}}", key):
             return key
     return ""
-
-
-def acquire_db_key(account_info: AccountInfo, config: dict[str, Any], args: argparse.Namespace) -> str:
-    key = (args.key or str(config.get("db_key") or "") or os.environ.get("WXMOMENTS_KEY", "")).strip()
-    if key:
-        return key
-
-    saved = load_saved_db_key(account_info)
-    if saved:
-        print("已使用本地保存的数据库密钥。")
-        return saved
-
-    if not is_wechat_running():
-        input("请先登录电脑版微信，确认已进入微信主界面后按回车继续...")
-    else:
-        input("请确认电脑版微信已登录并停留在主界面，然后按回车自动获取密钥...")
-
-    from wechat_decrypt_tool.modules.key_service import get_db_key_workflow
-
-    try:
-        result = get_db_key_workflow(db_storage_path=str(account_info.db_storage_dir))
-        return str(result.get("db_key") or "").strip()
-    except Exception as exc:
-        print(f"自动获取密钥失败: {exc}")
-        return input("请手动输入数据库密钥（64位十六进制）: ").strip()
 
 
 async def save_image_keys(account: str, wxid_dir: Path, db_storage_dir: Path) -> None:
@@ -596,6 +489,19 @@ def meets_expected_size(payload: bytes, media_type: str, expected: tuple[int, in
 
 def timestamp_folder_name(created: datetime) -> str:
     return created.strftime("%Y%m%d_%H%M%S")
+
+
+def _find_existing_image(post_dir: Path, index: int) -> Path | None:
+    """分组下载时用：找 post_dir 下已存在且非空的第 index 张图（扩展名不限）。"""
+    if not post_dir.is_dir():
+        return None
+    for candidate in sorted(post_dir.glob(f"{index:02d}.*")):
+        try:
+            if candidate.is_file() and candidate.stat().st_size > 0:
+                return candidate
+        except OSError:
+            continue
+    return None
 
 
 def unique_post_dir(figure: Path, created: datetime) -> Path:
@@ -841,7 +747,7 @@ def build_coverage_report(
             f"本地朋友圈记录疑似缺失：{largest['from']} 至 {largest['to']} 之间约 {largest['gap_days']} 天没有记录"
         )
     if warnings and dated:
-        warnings.append("以上仅反映本机缓存，不能据此确认好友未发布；请在微信中浏览对应时段后点击「刷新」。")
+        warnings.append("请在微信中浏览对应时段后点击「刷新」，本机缓存才会更新。")
     report["large_gap_count"] = len(gaps)
     report["local_stale_days"] = stale_days
     report["warnings"] = warnings
@@ -1233,51 +1139,6 @@ def load_contact_details(account_dir: Path) -> list[dict[str, Any]]:
     return [details[k] for k in sorted(details, key=lambda k: (details[k]["remark"] or details[k]["nickname"] or k).casefold())]
 
 
-def write_contact_cache(account_dir: Path, contacts: list[ContactEntry]) -> Path:
-    cache_path = account_dir / "_contacts_cache.json"
-    payload = [
-        {
-            "wxid": item.username,
-            "nickname": item.nickname,
-            "remark": item.remark,
-        }
-        for item in contacts
-    ]
-    cache_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return cache_path
-
-
-def export_contact_list(output: Path, contacts: list[ContactEntry]) -> dict[str, Any]:
-    output.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["wxid", "昵称", "备注名"]
-    has_other = any(c.other_info for c in contacts)
-    has_privacy = any(c.privacy_status for c in contacts)
-    if has_other:
-        fieldnames.append("其他信息")
-    if has_privacy:
-        fieldnames.append("隐私状态")
-    rows = [
-        {
-            "wxid": item.username,
-            "昵称": item.nickname,
-            "备注名": item.remark,
-            **({"其他信息": item.other_info} if has_other else {}),
-            **({"隐私状态": item.privacy_status} if has_privacy else {}),
-        }
-        for item in contacts
-    ]
-    json_path = output / "contacts.json"
-    csv_path = output / "contacts.csv"
-    json_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
-    with csv_path.open("w", encoding="utf-8-sig", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-    exported = len(rows)
-    print(f"  共导出 {exported} 位好友", flush=True)
-    return {"contacts_exported": len(rows), "contacts_json": str(json_path), "contacts_csv": str(csv_path)}
-
-
 def build_contact_lookup(contacts: list[ContactEntry]) -> dict[str, list[ContactEntry]]:
     lookup: dict[str, list[ContactEntry]] = {}
     for contact in contacts:
@@ -1431,66 +1292,6 @@ async def format_post_interactions(
         lines.extend(comment_lines)
 
     return "\n".join(lines).strip()
-
-
-def resolve_contact_input(
-    raw: str,
-    lookup: dict[str, list[ContactEntry]],
-    account_info: AccountInfo,
-    config: dict[str, Any],
-) -> list[str]:
-    value = str(raw or "").strip()
-    if value == "/me":
-        return self_username_candidates(account_info, config)
-
-    key = normalize_contact_lookup_text(value)
-    matches = lookup.get(key) or []
-    if not matches:
-        raise ValueError(f"没有找到好友：{value}")
-
-    usernames = sorted({item.username for item in matches if item.username})
-    if len(usernames) > 1:
-        names = []
-        for item in matches[:8]:
-            label = item.remark or item.nickname or item.username
-            names.append(f"{label}({item.username})")
-        raise ValueError(f"匹配到多个好友：{value}。请给目标好友设置更唯一的备注后重试。匹配项：{', '.join(names)}")
-    return usernames
-
-
-def ask_friend_filters(
-    account_info: AccountInfo,
-    account_dir: Path,
-    config: dict[str, Any],
-    contacts: list[ContactEntry] | None = None,
-) -> tuple[list[str] | None, list[dict[str, str]]]:
-    contacts = contacts if contacts is not None else load_contact_entries(account_dir)
-    write_contact_cache(account_dir, contacts)
-    lookup = build_contact_lookup(contacts)
-
-    selected_usernames: list[str] = []
-    selected_contacts: list[dict[str, str]] = []
-    index = 1
-    while True:
-        if index == 1:
-            raw = input("请输入第1位好友的昵称或备注（回车=所有人）: ").strip()
-            if not raw:
-                return None, []
-        else:
-            raw = input(f"请输入第{index}位好友的昵称或备注（/enough=结束）: ").strip()
-            if not raw:
-                continue
-        if raw == "/enough":
-            if not selected_usernames:
-                raise ValueError("还没有选择任何好友")
-            return selected_usernames, selected_contacts
-
-        resolved = resolve_contact_input(raw, lookup, account_info, config)
-        for username in resolved:
-            if username not in selected_usernames:
-                selected_usernames.append(username)
-        selected_contacts.append({"input": raw, "usernames": ",".join(resolved)})
-        index += 1
 
 
 async def fetch_remote_image(account_dir: Path, media: dict[str, Any], prefer_thumb: bool) -> tuple[bytes, str, str]:
@@ -1685,11 +1486,8 @@ def describe_empty_export(
         named = "、".join(f"“{u}”" for u in usernames[:5])
         lines.append(
             f"按筛选条件 {named} 没有匹配到任何记录，但数据库里有 {len(everything)} 条朋友圈。\n"
-            "如果你选的是「只导出自己的朋友圈」，那就是它筛掉的：程序拿账号名去匹配朋友圈的发布者，"
-            "账号名识别失败时一条都匹配不上。可以：\n"
-            "  · 重新运行，在「是否只导出自己的朋友圈」处选 n，导出所有人；\n"
-            "  · 或在 config/config.json 里设置 \"self_username\" 为你的 wxid（微信"
-            "「我 → 设置 → 账号与安全」里可以看到）。"
+            "可能是这位好友从未在这台电脑上浏览过朋友圈（识别范围说明见网页「帮助」），"
+            "或筛选时间范围外没有记录。"
         )
         return "\n".join(lines)
 
@@ -1723,7 +1521,13 @@ async def export_markdown(
     progress_cb: Any = None,
     posts_override: list[dict[str, Any]] | None = None,
     coverage_posts: list[dict[str, Any]] | None = None,
+    reuse_existing: bool = False,
 ) -> tuple[dict[str, Any], list[ExportedPost]]:
+    """导出为 Markdown。
+
+    reuse_existing=True：按 createTime 使用稳定的帖子目录，并复用目录里已存在的图片文件
+    （不再联网重下）。用于分组「下载」—— 同一好友写到同一个固定文件夹。
+    """
     figure = output / "figure"
     figure.mkdir(parents=True, exist_ok=True)
     if posts_override is not None:
@@ -1761,6 +1565,7 @@ async def export_markdown(
         "missing_images": 0,
         "stickers": 0,
         "missing_stickers": 0,
+        "reused_images": 0,
         "local_earliest": coverage.get("local_earliest", ""),
         "local_latest": coverage.get("local_latest", ""),
         "coverage_gap_count": len(coverage.get("large_gaps") or []),
@@ -1785,7 +1590,10 @@ async def export_markdown(
             body = f"{body}\n\n🔗 **链接**：{content_url}" if body else f"🔗 **链接**：{content_url}"
         lines.extend([body, ""])
 
-        post_dir = unique_post_dir(figure, created)
+        if reuse_existing:
+            post_dir = figure / timestamp_folder_name(created)
+        else:
+            post_dir = unique_post_dir(figure, created)
         image_index = 0
         post_images: list[str] = []
         for media_raw in post.get("media") or []:
@@ -1797,11 +1605,21 @@ async def export_markdown(
                 media_type = 0
             if media_type != MEDIA_TYPE_IMAGE:
                 continue
+            image_index += 1
+            if reuse_existing:
+                existing = _find_existing_image(post_dir, image_index)
+                if existing is not None:
+                    rel = existing.relative_to(output).as_posix()
+                    post_images.append(rel)
+                    lines.extend([f"![{time_text} image {image_index}]({rel})", ""])
+                    stats["images"] += 1
+                    stats["reused_images"] += 1
+                    continue
             payload, mt, source = await choose_image(account_info, account_dir, post, media, allow_download=allow_download)
             if not payload:
+                image_index -= 1
                 stats["missing_images"] += 1
                 continue
-            image_index += 1
             post_dir.mkdir(parents=True, exist_ok=True)
             name = f"{image_index:02d}{mime_to_ext(mt)}"
             target = post_dir / name
@@ -2257,149 +2075,3 @@ def render_pdf(output: Path, posts: list[ExportedPost], pdf_path: Path) -> None:
             with contextlib.suppress(OSError):
                 shutil.rmtree(output / "_pdf_assets")
     render_pdf_direct(output, posts, pdf_path)
-
-
-_step_counter = 0
-
-
-def progress(label: str) -> None:
-    global _step_counter
-    _step_counter += 1
-    print(f"第{_step_counter}步：{label}", flush=True)
-
-
-
-async def main() -> int:
-    args = parse_args()
-    try:
-        if args.quiet:
-            RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-            (RUNTIME_DIR / "last_run.log").write_text("", encoding="utf-8")
-            log_path = RUNTIME_DIR / "last_run.log"
-            with log_path.open("a", encoding="utf-8") as log, contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
-                return await _main_impl(args)
-        else:
-            return await _main_impl(args)
-    except (FileNotFoundError, RuntimeError, ValueError) as exc:
-        print(f"\n运行失败：{exc}", file=sys.stderr, flush=True)
-        if os.environ.get("WXMOMENTS_DEBUG_TRACEBACK", "").strip().lower() in {"1", "true", "yes", "on"}:
-            raise
-        return 1
-
-
-async def _main_impl(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config))
-    ensure_imports()
-    print("欢迎使用 wxMoments 微信朋友圈导出备份工具！\n", flush=True)
-    print_input_rules()
-
-    progress("定位微信并获取密钥")
-    try:
-        account_info = find_account(config)
-    except FileNotFoundError as exc:
-        if args.quiet:
-            raise
-        account_info = find_account_with_interactive_retry(config, Path(args.config), exc)
-    key = acquire_db_key(account_info, config, args)
-    if not re.fullmatch(rf"[0-9a-fA-F]{{{DB_KEY_HEX_LENGTH}}}", key):
-        raise ValueError("数据库密钥必须是 64 位十六进制字符串")
-
-    start_raw = ask_input(args.start, "起始时间（格式: 20260606 或 2026-06-06，回车=不限制）", "")
-    end_raw = ask_input(args.end, "终止时间（格式: 20260606 或 2026-06-06，回车=不限制）", "")
-    only_raw = ask_input(args.only_self, "是否只导出自己的朋友圈? y/n", "y")
-    interactions_raw = ask_input(args.keep_interactions, "是否保留点赞评论? y/n", "n")
-    export_contacts_raw = ask_input(args.export_contacts, "是否导出好友列表? y/n", "n")
-    start = parse_datetime(start_raw, end_of_day=False)
-    end = parse_datetime(end_raw, end_of_day=True)
-    only_self = parse_yes_no(only_raw)
-    keep_interactions = parse_yes_no_default_no(interactions_raw)
-    export_contacts_enabled = parse_yes_no_default_no(export_contacts_raw)
-    usernames: list[str] | None = self_username_candidates(account_info, config) if only_self else None
-    friend_inputs: list[dict[str, str]] = []
-    contact_names: dict[str, str] = {}
-    output_root = Path(args.output_root or str(config.get("output_root") or "") or PROJECT_ROOT / "output").expanduser()
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output = output_root / timestamp
-    if output.exists():
-        shutil.rmtree(output)
-    output.mkdir(parents=True, exist_ok=True)
-
-    progress("解密数据库")
-    account_dir = decrypt_databases(account_info, key)
-    save_db_key(account_info, account_dir, key)
-
-    contacts: list[ContactEntry] = []
-    if (not only_self) or keep_interactions or export_contacts_enabled:
-        contacts = load_contact_entries(account_dir)
-        write_contact_cache(account_dir, contacts)
-        contact_names = build_contact_display_names(contacts)
-
-    contact_export_meta: dict[str, Any] = {}
-    if export_contacts_enabled:
-        progress("导出好友列表")
-        contact_export_meta = export_contact_list(output, contacts)
-
-    if not only_self:
-        progress("准备好友列表")
-        usernames, friend_inputs = ask_friend_filters(account_info, account_dir, config, contacts)
-
-    params = {
-        "start_time": start_raw,
-        "end_time": end_raw,
-        "only_self": only_self,
-        "keep_interactions": keep_interactions,
-        "export_contacts": export_contacts_enabled,
-        "friend_inputs": friend_inputs,
-    }
-    (output / "params.json").write_text(json.dumps(params, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    progress("准备图片")
-    await save_image_keys(account_info.account, account_info.wxid_dir, account_info.db_storage_dir)
-    from wechat_decrypt_tool.modules.sns_media import (
-        reset_sns_download_report,
-        sns_download_report,
-    )
-
-    reset_sns_download_report()
-    progress("导出朋友圈")
-    stats, exported_posts = await export_markdown(
-        account_info,
-        account_dir,
-        output,
-        start,
-        end,
-        usernames,
-        config,
-        keep_interactions,
-        contact_names,
-        allow_download=not args.no_download,
-    )
-    download_report = sns_download_report()
-    (output / "download_report.json").write_text(
-        json.dumps(download_report, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    download_summary = summarize_download_report(download_report)
-    if download_summary:
-        print(download_summary, flush=True)
-    progress("生成 PDF")
-    html_path = write_pdf_html(output, exported_posts)
-    pdf_path = output / "moments.pdf"
-    try:
-        render_pdf(output, exported_posts, pdf_path)
-    except Exception as exc:
-        raise RuntimeError(f"PDF 生成失败: {exc}。HTML 已生成: {html_path}") from exc
-    result = {
-        "output": str(output),
-        **params,
-        **contact_export_meta,
-        **stats,
-        "download_report": download_report.get("counts", {}),
-    }
-    print(f"\n导出完成：{output}", flush=True)
-    if not args.quiet:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))

@@ -1,10 +1,8 @@
 __pycache__/
-*.pyc
-runtime/.venv/
-runtime/*.log
-runtime/dependencies.sha256
-runtime/startup-error.html
-runtime/output/
-runtime/verification/
+*.py[cod]
+.pytest_cache/
+runtime/
 output/
 config/config.json
+.DS_Store
+Thumbs.db

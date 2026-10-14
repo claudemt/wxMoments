@@ -297,6 +297,7 @@ async function restoreMoments() {
   await loadContacts();
   await refreshTimeline();
   loadContactsAll();
+  loadGroups();
 }
 
 function setInitBusy() {
@@ -326,6 +327,7 @@ async function finishInit(job) {
   await loadContacts();
   await refreshTimeline();
   await loadContactsAll();
+  await loadGroups();
 }
 
 function resetInitBtn() {
@@ -429,8 +431,11 @@ $("m-start").addEventListener("change", refreshTimeline);
 $("m-end").addEventListener("change", refreshTimeline);
 
 function openFilter() {
+  gState.editing = null;
+  $("m-group-name").value = "";
   renderFriends();
   updateFriendCount();
+  switchFilterTab("friends");
   show($("m-filter-overlay"), true);
 }
 $("m-filter-btn").onclick = openFilter;
@@ -440,6 +445,154 @@ $("fm-apply").onclick = closeFilter;
 $("m-filter-overlay").addEventListener("click", (e) => {
   if (e.target === $("m-filter-overlay")) closeFilter();
 });
+
+// —— 好友分组：勾选好友 → 命名存组 → 下载 ——
+const gState = { groups: [], editing: null };
+
+function groupName(g) {
+  return g.name || g.folder || "分组";
+}
+
+function switchFilterTab(name) {
+  const friends = name === "friends";
+  $("fm-tab-friends").classList.toggle("active", friends);
+  $("fm-tab-groups").classList.toggle("active", !friends);
+  show($("fm-pane-friends"), friends);
+  show($("fm-pane-groups"), !friends);
+  if (!friends) renderGroups();
+}
+
+async function loadGroups() {
+  if (!mState.inited) return;
+  let res;
+  try {
+    res = await api("/api/moments/groups", {});
+  } catch (error) {
+    return;
+  }
+  if (!res || !res.ok) return;
+  gState.groups = res.groups || [];
+  const unread = gState.groups.reduce((s, g) => s + (g.new_posts || 0), 0);
+  $("m-groups-count").textContent = unread
+    ? ` ${unread} 新`
+    : (gState.groups.length ? ` ${gState.groups.length}` : "");
+  $("m-groups-count").classList.toggle("mg-unread", unread > 0);
+  if (!$("m-filter-overlay").hidden && !$("fm-pane-groups").hidden) renderGroups();
+}
+
+async function markGroupSeen(g) {
+  if (!(g.new_posts > 0)) return;
+  const res = await api("/api/moments/groups/seen", { id: g.id }, true);
+  if (res && res.ok) {
+    g.new_posts = 0;
+    $("m-groups-count").textContent = gState.groups.length ? ` ${gState.groups.length}` : "";
+    $("m-groups-count").classList.remove("mg-unread");
+    if (!$("fm-pane-groups").hidden) renderGroups();
+  }
+}
+
+function renderGroups() {
+  const box = $("m-groups-list");
+  box.replaceChildren();
+  if (!gState.groups.length) {
+    const empty = document.createElement("div");
+    empty.className = "muted mg-empty";
+    empty.textContent = "还没有分组。切到「好友」勾选几位好友，填入名称保存即可。";
+    box.append(empty);
+    return;
+  }
+  for (const g of gState.groups) {
+    const row = document.createElement("div");
+    row.className = "mg-row" + (g.new_posts > 0 ? " mg-updated" : "");
+    const info = document.createElement("div");
+    info.className = "mg-info";
+    const title = document.createElement("strong");
+    title.textContent = groupName(g);
+    const meta = document.createElement("span");
+    meta.className = "muted";
+    const base = g.total_posts - (g.new_posts || 0);
+    const parts = [`${g.members.length} 位好友`,
+      g.total_posts ? (g.new_posts > 0 ? `${base}+${g.new_posts}条` : `${g.total_posts}条`) : "",
+      g.split ? "拆分" : "组合",
+      g.last_export ? `最近导出 ${g.last_export}` : "尚未导出"];
+    meta.textContent = parts.filter(Boolean).join(" · ");
+    info.append(title, meta);
+    const actions = document.createElement("div");
+    actions.className = "mg-actions";
+    actions.append(
+      groupButton("下载", () => exportGroup(g), "primary"),
+      groupButton("编辑", () => editGroup(g)),
+      groupButton("删除", () => deleteGroup(g)),
+    );
+    row.onclick = (event) => {
+      if (event.target.closest("button")) return;
+      markGroupSeen(g);
+      if (!g.new_posts) return;
+    };
+    row.append(info, actions);
+    box.append(row);
+  }
+}
+
+function groupButton(text, onclick, cls = "ghost") {
+  const btn = document.createElement("button");
+  btn.className = cls;
+  btn.textContent = text;
+  btn.onclick = onclick;
+  return btn;
+}
+
+async function exportGroup(g) {
+  const res = await api("/api/export", { type: "moments_group", id: g.id });
+  if (!res.ok) { notify(res.msg || "导出失败", "warning"); return; }
+  const mode = g.split ? "拆分" : "组合";
+  startJob(res.job, `${groupName(g)} · ${g.members.length} 位好友 · ${mode}`, res.dir || "",
+    async () => { await loadGroups(); });
+}
+
+function editGroup(g) {
+  mState.picked = new Set(g.members.map((m) => m.wxid));
+  gState.editing = g.id;
+  $("m-group-name").value = g.name || groupName(g);
+  $("m-keep").checked = !!g.keep_interactions;
+  $("m-group-split").checked = !!g.split;
+  renderFriends();
+  updateFriendCount();
+  switchFilterTab("friends");
+  notify(`正在编辑分组「${groupName(g)}」：改完勾选后点「保存为分组」`, "info");
+  refreshTimeline();
+}
+
+async function deleteGroup(g) {
+  if (!confirm(`删除分组「${groupName(g)}」？已导出的文件夹会保留。`)) return;
+  const res = await api("/api/moments/groups/delete", { id: g.id });
+  if (!res.ok) { notify(res.msg || "删除失败", "warning"); return; }
+  if (gState.editing === g.id) gState.editing = null;
+  await loadGroups();
+}
+
+$("m-group-save").onclick = async () => {
+  const name = $("m-group-name").value.trim();
+  if (!name) { notify("请先填写分组名称", "warning"); return; }
+  if (!mState.picked.size) { notify("请至少勾选一位好友", "warning"); return; }
+  const payload = {
+    name,
+    usernames: [...mState.picked],
+    keep_interactions: $("m-keep").checked,
+    split: $("m-group-split").checked,
+  };
+  if (gState.editing) payload.id = gState.editing;
+  const res = await api("/api/moments/groups/save", payload);
+  if (!res.ok) { notify(res.msg || "保存失败", "warning"); return; }
+  gState.editing = null;
+  $("m-group-name").value = "";
+  await loadGroups();
+  switchFilterTab("groups");
+  notify(`已保存分组「${name}」`, "success");
+};
+
+$("fm-tab-friends").onclick = () => switchFilterTab("friends");
+$("fm-tab-groups").onclick = () => switchFilterTab("groups");
 
 let lastCoverageSignature = "";
 function shiftDate(value, days) {
@@ -522,7 +675,7 @@ async function refreshTimeline() {
   });
   if (requestId !== timelineRequest) return;
   if (!res.ok) {
-    if (/未初始化|未就绪|解密|请先点击「重新解密」/.test(res.msg || "")) {
+    if (/未初始化|未就绪|解密|请先点击「刷新」/.test(res.msg || "")) {
       mState.inited = false;
       show($("m-body"), false);
       resetInitBtn();

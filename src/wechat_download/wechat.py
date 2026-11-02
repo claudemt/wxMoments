@@ -1,4 +1,3 @@
-"""微信公众号文章抓取、解析、图片下载。"""
 from __future__ import annotations
 
 import json
@@ -15,7 +14,6 @@ from .config import FETCH_UA, SESSION_FILE
 
 @dataclass
 class Session:
-    """一次微信抓包获得的登录态，按公众号（__biz）分别保存。"""
     biz: str
     key: str = ""
     uin: str = ""
@@ -42,14 +40,6 @@ def load_sessions() -> dict[str, Session]:
 
 
 def _read_session_raw() -> dict | None:
-    """读 session.json，损坏时尽量从残留段里救回最新一份有效 JSON。
-
-    只兼容读取旧版登录态；当前版本不再写入抓包凭据。
-    - 整文件合法 → 直接用；
-    - 不合法 → 用 raw_decode 逐段扫描，收集所有完整 JSON 段，
-      取最后一段当数据（多进程并发写撕裂时，最后写完的那段通常最新）；
-    - 一段都救不回 → None（调用方按无会话处理）。
-    """
     text = SESSION_FILE.read_text(encoding="utf-8")
     try:
         data = json.loads(text)
@@ -131,7 +121,6 @@ def _var(html: str, name: str) -> str:
 
 
 def ensure_chksm(url: str) -> str:
-    """Reuse the cache harvester; newly opened articles are visible immediately."""
     from . import harvest
     parsed = harvest.parse_article_url(url)
     if not parsed or parsed["chksm"]:
@@ -226,7 +215,6 @@ def get_article(url: str, session: Session | None = None) -> Article:
 
 
 def download_image(url: str, referer: str = "https://mp.weixin.qq.com/") -> tuple[bytes, str]:
-    """下载图片，返回 (bytes, 扩展名)。"""
     headers = {
         "User-Agent": FETCH_UA,
         "Referer": referer,
@@ -250,7 +238,6 @@ def download_image(url: str, referer: str = "https://mp.weixin.qq.com/") -> tupl
 
 
 def full_size_url(url: str) -> str:
-    """把 mmbiz 的 640 缩略图换成原图。"""
     url = url.replace("&amp;", "&")
     if "mmbiz.qpic.cn" not in url:
         return url

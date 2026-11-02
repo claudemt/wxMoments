@@ -3,15 +3,15 @@
 const $ = (id) => document.getElementById(id);
 
 function notify(message, level = "error") {
-  return floating.message(String(message || "操作失败，请重试"), level);
+  return floating.message(String(message || "操作失败"), level);
 }
 const enqueueBanner = (message) => notify(message, "success");
 
 window.addEventListener("unhandledrejection", (event) => {
   event.preventDefault();
-  if (!event.reason?.reported) notify(event.reason?.message || "操作失败，请重试");
+  if (!event.reason?.reported) notify(event.reason?.message || "操作失败");
 });
-window.addEventListener("error", (event) => notify(event.message || "页面发生错误，请刷新重试"));
+window.addEventListener("error", (event) => notify(event.message || "页面出错，请刷新"));
 
 async function api(path, body, silent = false) {
   try {
@@ -22,7 +22,7 @@ async function api(path, body, silent = false) {
       signal: AbortSignal.timeout(60000),
     });
     const result = await response.json().catch(() => ({
-      ok: false, msg: `服务错误（${response.status}），请重试。`,
+      ok: false, msg: `服务错误 ${response.status}`,
     }));
     if (!response.ok || result.ok === false) {
       if (!silent) notify(result.msg || `服务返回错误（${response.status}）`);
@@ -35,7 +35,7 @@ async function api(path, body, silent = false) {
     return result;
   } catch (error) {
     if (!silent && !error.reported) {
-      notify("连不上本地服务，请重新启动 run.bat 后刷新。");
+      notify("连不上本地服务，请重启后刷新");
       error.reported = true;
     }
     throw error;
@@ -47,6 +47,46 @@ function escapeHtml(s) {
   return String(s == null ? "" : s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+let askResolve = null;
+function askConfirm({ title = "确认删除？", message = "", okText = "确认",
+  cancelText = "取消", danger = true } = {}) {
+  const overlay = $("ask-overlay");
+  const ok = $("ask-ok");
+  const cancel = $("ask-cancel");
+  if (askResolve) askResolve(false);
+  $("ask-title").textContent = title;
+  const text = $("ask-text");
+  text.textContent = message;
+  text.hidden = !message;
+  ok.textContent = okText;
+  cancel.textContent = cancelText;
+  ok.classList.toggle("danger", danger);
+  ok.classList.toggle("primary", !danger);
+  show(overlay, true);
+  ok.focus();
+
+  return new Promise((resolve) => {
+    const finish = (value) => {
+      show(overlay, false);
+      document.removeEventListener("keydown", onKey);
+      overlay.removeEventListener("click", onBackdrop);
+      ok.onclick = cancel.onclick = null;
+      askResolve = null;
+      resolve(value);
+    };
+    const onKey = (event) => {
+      if (event.key === "Escape") { event.preventDefault(); finish(false); }
+      else if (event.key === "Enter") { event.preventDefault(); finish(true); }
+    };
+    const onBackdrop = (event) => { if (event.target === overlay) finish(false); };
+    askResolve = finish;
+    ok.onclick = () => finish(true);
+    cancel.onclick = () => finish(false);
+    overlay.addEventListener("click", onBackdrop);
+    document.addEventListener("keydown", onKey);
+  });
 }
 
 function renderPager(container, total, size, page, onPage) {
@@ -66,7 +106,7 @@ function renderPager(container, total, size, page, onPage) {
   btn("下一页 ›", page >= pages - 1, () => onPage(page + 1));
 }
 
-const task = { jobs: new Map(), poll: null, polling: false };
+const task = { jobs: new Map(), poll: null, polling: false, ticker: null };
 let diagnosticsCursor = null;
 let serviceOffline = false;
 
@@ -82,7 +122,7 @@ async function pollDiagnostics() {
       }
     }
   } catch (error) {
-    if (!serviceOffline) notify("服务连接中断，请重新启动后刷新页面。");
+    if (!serviceOffline) notify("服务连接中断，请刷新页面");
     serviceOffline = true;
   }
   setTimeout(pollDiagnostics, 4000);
@@ -94,6 +134,41 @@ function startJob(jobId, title, dir, onComplete = null, kind = "export") {
     snapshot: { status: "running", done: 0, total: 0, message: "准备中…", log: [] } });
   renderJob(task.jobs.get(jobId));
   if (!task.polling) pollJob();
+  startTaskTicker();
+}
+
+function startTaskTicker() {
+  if (task.ticker) return;
+  task.ticker = setInterval(() => {
+    let alive = false;
+    for (const item of [...task.jobs.values()]) {
+      if (item.completed) continue;
+      alive = true;
+      if (item.snapshot.status === "running") renderJob(item);
+    }
+    if (!alive) {
+      clearInterval(task.ticker);
+      task.ticker = null;
+    }
+  }, 700);
+}
+
+const CREEP_CEILING = 95;
+
+function creepPercent(item) {
+  const job = item.snapshot;
+  if (job.status === "done") {
+    item.shown = 100;
+    return 100;
+  }
+  const real = job.total ? Math.min(100, job.done / job.total * 100) : 0;
+  let shown = Math.max(item.shown || 0, real);
+  if (job.status === "running" && shown < CREEP_CEILING) {
+    const step = Math.min(1.5, Math.max(0.15, (CREEP_CEILING - shown) * 0.03));
+    shown = Math.min(CREEP_CEILING, shown + step);
+  }
+  item.shown = Math.min(shown, 100);
+  return item.shown;
 }
 
 function renderJob(item) {
@@ -102,9 +177,10 @@ function renderJob(item) {
     floating.close(`job:${item.id}`);
     return;
   }
-  const pct = job.total ? Math.min(100, Math.round(job.done / job.total * 100)) : 0;
+  const pct = creepPercent(item);
+  const shownPct = Math.min(99, Math.round(pct));
   const level = job.status === "running" ? "info" : job.status === "error" ? "error" : job.status === "done" ? "success" : "info";
-  const title = `${item.title} · ${job.status === "running" ? `处理中 ${pct}%` : job.status === "done" ? "已完成" : job.status === "canceled" ? "已取消" : "失败"}`;
+  const title = `${item.title} · ${job.status === "running" ? `处理中 ${shownPct}%` : job.status === "done" ? "已完成" : job.status === "canceled" ? "已取消" : "失败"}`;
   const popup = floating.open(`job:${item.id}`, title, level);
   popup.onClose = () => task.jobs.delete(item.id);
   if (!item.view) {
@@ -186,23 +262,20 @@ async function pollJob() {
 $("btn-output").onclick = () => api("/api/reveal", { path: "" });
 
 let supportFocus = null;
-function openSupport(kind) {
+function openSupport() {
   supportFocus = document.activeElement;
   floating.close("coverage");
-  $("support-title").textContent = kind === "help" ? "帮助" : "查看日志";
-  show($("help-body"), kind === "help");
-  show($("logs-body"), kind === "logs");
+  show($("logs-body"), true);
   show($("support-overlay"));
   $("support-close").focus();
-  if (kind === "logs") loadLogs();
+  loadLogs();
 }
 function closeSupport() {
   if ($("support-overlay").hidden) return;
   show($("support-overlay"), false);
   (supportFocus?.isConnected ? supportFocus : $("btn-logs")).focus();
 }
-$("btn-help").onclick = () => openSupport("help");
-$("btn-logs").onclick = () => openSupport("logs");
+$("btn-logs").onclick = openSupport;
 $("support-close").onclick = closeSupport;
 $("support-overlay").addEventListener("click", (event) => {
   if (event.target === $("support-overlay")) closeSupport();
@@ -297,7 +370,13 @@ async function restoreMoments() {
   await loadContacts();
   await refreshTimeline();
   loadContactsAll();
-  loadGroups();
+  await loadGroups();
+  followLabelJob(res.label_job);
+}
+
+function followLabelJob(jobId) {
+  if (!jobId || task.jobs.has(jobId)) return;
+  startJob(jobId, "读取微信标签成员", "", async () => { await loadGroups(); }, "label");
 }
 
 function setInitBusy() {
@@ -328,6 +407,8 @@ async function finishInit(job) {
   await refreshTimeline();
   await loadContactsAll();
   await loadGroups();
+  const status = await api("/api/moments/status", undefined, true).catch(() => null);
+  if (status && status.label_job) followLabelJob(status.label_job);
 }
 
 function resetInitBtn() {
@@ -430,8 +511,16 @@ $("m-friend-clear").onclick = () => {
 $("m-start").addEventListener("change", refreshTimeline);
 $("m-end").addEventListener("change", refreshTimeline);
 
+function setEditingGroup(id, mode) {
+  gState.editing = id || null;
+  gState.editingMode = id ? (mode || "custom") : null;
+  $("m-group-save").textContent = gState.editing ? "保存" : "保存为分组";
+  show($("fm-group-save"), true);
+  $("fm-apply").textContent = "完成";
+}
+
 function openFilter() {
-  gState.editing = null;
+  setEditingGroup(null);
   $("m-group-name").value = "";
   renderFriends();
   updateFriendCount();
@@ -446,8 +535,8 @@ $("m-filter-overlay").addEventListener("click", (e) => {
   if (e.target === $("m-filter-overlay")) closeFilter();
 });
 
-// —— 好友分组：勾选好友 → 命名存组 → 下载 ——
-const gState = { groups: [], editing: null };
+const gState = { groups: [], labels: [], labelState: null, labelNotices: [],
+  editing: null, editingMode: null };
 
 function groupName(g) {
   return g.name || g.folder || "分组";
@@ -472,10 +561,15 @@ async function loadGroups() {
   }
   if (!res || !res.ok) return;
   gState.groups = res.groups || [];
-  const unread = gState.groups.reduce((s, g) => s + (g.new_posts || 0), 0);
-  $("m-groups-count").textContent = unread
-    ? ` ${unread} 新`
-    : (gState.groups.length ? ` ${gState.groups.length}` : "");
+  gState.labels = res.labels || [];
+  gState.labelState = res.label_state || null;
+  gState.labelNotices = res.label_notices || [];
+  renderLabelState();
+  showLabelNotices();
+  const total = gState.groups.length + gState.labels.length;
+  const unread = gState.groups.reduce((s, g) => s + (g.new_posts || 0), 0)
+    + gState.labels.reduce((s, g) => s + (g.new_posts || 0), 0);
+  $("m-groups-count").textContent = unread ? ` ${unread} 新` : (total ? ` ${total}` : "");
   $("m-groups-count").classList.toggle("mg-unread", unread > 0);
   if (!$("m-filter-overlay").hidden && !$("fm-pane-groups").hidden) renderGroups();
 }
@@ -485,53 +579,173 @@ async function markGroupSeen(g) {
   const res = await api("/api/moments/groups/seen", { id: g.id }, true);
   if (res && res.ok) {
     g.new_posts = 0;
-    $("m-groups-count").textContent = gState.groups.length ? ` ${gState.groups.length}` : "";
-    $("m-groups-count").classList.remove("mg-unread");
-    if (!$("fm-pane-groups").hidden) renderGroups();
+    await loadGroups();
+  }
+}
+
+async function markLabelSeen(g) {
+  if (!(g.new_posts > 0)) return;
+  const res = await api("/api/moments/labels/seen", { id: g.id }, true);
+  if (res && res.ok) {
+    g.new_posts = 0;
+    await loadGroups();
+  }
+}
+
+function renderLabelState() {
+  show($("m-label-sync-all"), (gState.labels || []).length > 0);
+}
+
+async function syncAllLabels() {
+  const btn = $("m-label-sync-all");
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "正在检查…";
+  try {
+    let res;
+    try {
+      res = await api("/api/moments/labels/sync", { all: true }, true);
+    } catch (error) {
+      notify("检查失败，请稍后重试", "warning");
+      return;
+    }
+    if (!res || !res.ok) {
+      notify((res && res.msg) || "检查失败", "warning");
+      return;
+    }
+    if (res.stale) {
+      await loadGroups();
+      notify(`未取到最新数据：${res.stale}`, "warning");
+      return;
+    }
+    if (res.mode === "db") {
+      await loadGroups();
+      const notices = (gState.labelNotices || []).length;
+      const bits = [];
+      if (res.imported) bits.push(`新导入 ${res.imported} 个标签`);
+      for (const name of res.removed_names || []) bits.push(`已删除「${name}」`);
+      for (const item of res.renamed || []) bits.push(`「${item.from}」改名为「${item.to}」`);
+      if (notices) bits.push(`${notices} 个标签有变化`);
+      notify(bits.length ? bits.join("；") : "没有变化",
+        bits.length ? "warning" : "success");
+      return;
+    }
+    if (!res.job) {
+      await loadGroups();
+      notify(res.msg || "没有变化", "success");
+      return;
+    }
+    const job = await runJob(res.job, "同步微信标签", "");
+    await loadGroups();
+    notify(job.message || (job.status === "done" ? "标签同步完成" : "标签同步失败"),
+      job.status === "done" ? "success" : "warning");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
   }
 }
 
 function renderGroups() {
   const box = $("m-groups-list");
   box.replaceChildren();
-  if (!gState.groups.length) {
-    const empty = document.createElement("div");
-    empty.className = "muted mg-empty";
-    empty.textContent = "还没有分组。切到「好友」勾选几位好友，填入名称保存即可。";
-    box.append(empty);
-    return;
-  }
-  for (const g of gState.groups) {
-    const row = document.createElement("div");
-    row.className = "mg-row" + (g.new_posts > 0 ? " mg-updated" : "");
-    const info = document.createElement("div");
-    info.className = "mg-info";
-    const title = document.createElement("strong");
-    title.textContent = groupName(g);
-    const meta = document.createElement("span");
-    meta.className = "muted";
-    const base = g.total_posts - (g.new_posts || 0);
-    const parts = [`${g.members.length} 位好友`,
-      g.total_posts ? (g.new_posts > 0 ? `${base}+${g.new_posts}条` : `${g.total_posts}条`) : "",
-      g.split ? "拆分" : "组合",
-      g.last_export ? `最近导出 ${g.last_export}` : "尚未导出"];
-    meta.textContent = parts.filter(Boolean).join(" · ");
-    info.append(title, meta);
+  const labels = gState.labels || [];
+  labels.forEach((g) => box.append(groupRow(g, true)));
+  gState.groups.forEach((g) => box.append(groupRow(g, false)));
+}
+
+const labelNoticePopups = new Map();
+const dismissedLabelNotices = new Set();
+
+function noticeSignature(item) {
+  return [item.id, item.kind, (item.added || []).join("|"), (item.removed || []).join("|")].join("::");
+}
+
+function showLabelNotices() {
+  const items = gState.labelNotices || [];
+  const alive = new Set();
+  for (const item of items) {
+    const sig = noticeSignature(item);
+    alive.add(item.id);
+    if (dismissedLabelNotices.has(sig)) continue;
+    const current = labelNoticePopups.get(item.id);
+    if (current && current.sig === sig) continue;
+    if (current) floating.close(`label:${item.id}`);
+    const entry = floating.open(`label:${item.id}`,
+      item.kind === "deleted" ? "微信标签已被删除" : "微信标签有变化", "warning");
+    const text = document.createElement("p");
+    text.className = "floating-text";
+    text.textContent = item.text;
     const actions = document.createElement("div");
-    actions.className = "mg-actions";
-    actions.append(
-      groupButton("下载", () => exportGroup(g), "primary"),
-      groupButton("编辑", () => editGroup(g)),
-      groupButton("删除", () => deleteGroup(g)),
-    );
-    row.onclick = (event) => {
-      if (event.target.closest("button")) return;
-      markGroupSeen(g);
-      if (!g.new_posts) return;
+    actions.className = "floating-actions";
+    if (item.kind === "deleted") {
+      actions.append(
+        groupButton("知道了", () => floating.close(`label:${item.id}`)),
+        groupButton("转为分组", () => convertLabel(item), "primary"),
+      );
+    } else {
+      actions.append(
+        groupButton("忽略", () => applyLabelNotice(item, "ignore")),
+        groupButton("同步", () => applyLabelNotice(item, "sync"), "primary"),
+      );
+    }
+    entry.body.replaceChildren(text, actions);
+    floating.pin(entry);
+    entry.onClose = () => {
+      labelNoticePopups.delete(item.id);
+      dismissedLabelNotices.add(sig);
     };
-    row.append(info, actions);
-    box.append(row);
+    labelNoticePopups.set(item.id, { sig, entry });
   }
+  for (const [id, info] of [...labelNoticePopups]) {
+    if (alive.has(id)) continue;
+    labelNoticePopups.delete(id);
+    floating.close(`label:${id}`);
+  }
+}
+
+function groupMetaText(g, isLabel) {
+  const members = (g.members || []).length;
+  const total = g.total_posts || 0;
+  const fresh = g.new_posts || 0;
+  const split = isLabel ? $("m-group-split").checked : !!g.split;
+  const parts = [`${members} 位好友`,
+    total ? (fresh > 0 ? `${total - fresh}+${fresh}条` : `${total}条`) : "",
+    split ? "拆分" : "组合",
+    g.last_export ? `最近导出 ${g.last_export}` : "尚未导出"];
+  return parts.filter(Boolean).join(" · ");
+}
+
+function groupRow(g, isLabel) {
+  const row = document.createElement("div");
+  row.className = "mg-row" + (g.new_posts > 0 ? " mg-updated" : "")
+    + (isLabel && g.present === false ? " mg-off" : "");
+  const info = document.createElement("div");
+  info.className = "mg-info";
+  const title = document.createElement("strong");
+  title.textContent = groupName(g);
+  const meta = document.createElement("span");
+  meta.className = "muted";
+  meta.textContent = groupMetaText(g, isLabel);
+  info.append(title, meta);
+  if (g.note) {
+    const note = document.createElement("span");
+    note.className = "mg-note";
+    note.textContent = g.note;
+    info.append(note);
+  }
+  const actions = document.createElement("div");
+  actions.className = "mg-actions";
+  actions.append(
+    groupButton("下载", () => (isLabel ? exportLabel(g) : exportGroup(g)), "primary"),
+    groupButton("编辑", () => (isLabel ? editLabel(g) : editGroup(g))),
+    groupButton("删除", () => (isLabel ? deleteLabel(g) : deleteGroup(g))),
+  );
+  row.onclick = (event) => {
+    if (event.target.closest("button")) return;
+    if (isLabel) markLabelSeen(g); else markGroupSeen(g);
+  };
+  row.append(info, actions);
+  return row;
 }
 
 function groupButton(text, onclick, cls = "ghost") {
@@ -540,6 +754,132 @@ function groupButton(text, onclick, cls = "ghost") {
   btn.textContent = text;
   btn.onclick = onclick;
   return btn;
+}
+
+function runJob(jobId, title, dir = "") {
+  return new Promise((resolve) => {
+    startJob(jobId, title, dir, (job) => resolve(job), "label");
+  });
+}
+
+async function syncLabel(g) {
+  let res;
+  try {
+    res = await api("/api/moments/labels/sync", { id: g.id }, true);
+  } catch (error) {
+    notify("同步没能启动");
+    return null;
+  }
+  if (!res || !res.ok) {
+    notify((res && res.msg) || "同步没能启动", "warning");
+    return null;
+  }
+  if (res.mode === "db") {
+    await loadGroups();
+    const fresh = (gState.labels || []).find((item) => item.id === g.id);
+    if (fresh && fresh.status !== "ok" && fresh.note) notify(`「${g.name}」：${fresh.note}`, "warning");
+    return fresh || null;
+  }
+  if (!res.job) {
+    await loadGroups();
+    return null;
+  }
+  const job = await runJob(res.job, `同步微信标签 · ${g.name}`, "");
+  await loadGroups();
+  if (job.status !== "done") {
+    notify(job.message || "标签同步失败", "warning");
+    return null;
+  }
+  const fresh = (gState.labels || []).find((item) => item.id === g.id);
+  if (fresh && fresh.status !== "ok" && fresh.note) notify(`「${g.name}」：${fresh.note}`, "warning");
+  return fresh || null;
+}
+
+async function exportLabel(g) {
+  let label = g;
+  if (!label.members.length) {
+    label = await syncLabel(g);
+    if (!label || !label.members.length) {
+      notify("标签里没有好友", "warning");
+      return;
+    }
+  }
+  let res;
+  const payload = {
+    type: "moments_group",
+    id: label.id,
+    split: $("m-group-split").checked,
+    keep_interactions: $("m-keep").checked,
+  };
+  try {
+    res = await api("/api/export", payload, true);
+    if (res && res.need_confirm) {
+      const go = await askConfirm({
+        title: "朋友圈可能不完整", message: res.msg || "部分时间段可能缺失，仍然导出吗？",
+        okText: "仍然导出", danger: false,
+      });
+      if (!go) return;
+      res = await api("/api/export", { ...payload, allow_partial: true }, true);
+    }
+  } catch (error) {
+    return;
+  }
+  if (!res || !res.ok) {
+    notify((res && res.msg) || "导出失败", "warning");
+    return;
+  }
+  startJob(res.job, `${label.name} · 微信标签 · ${label.members.length} 位好友`, res.dir || "",
+    async () => { await loadGroups(); });
+}
+
+async function editLabel(g) {
+  const visible = new Set(mState.contacts.map((c) => c.wxid));
+  const ids = (g.members || []).map((m) => m.wxid);
+  const picked = ids.filter((id) => visible.has(id));
+  mState.picked = new Set(picked);
+  setEditingGroup(g.id, "label");
+  $("m-group-name").value = g.name || "";
+  renderFriends();
+  updateFriendCount();
+  switchFilterTab("friends");
+  refreshTimeline();
+}
+
+async function deleteLabel(g) {
+  const go = await askConfirm({
+    title: "确认删除？",
+    message: `删除标签「${g.name}」？`,
+    okText: "确认", cancelText: "取消",
+  });
+  if (!go) return;
+  const res = await api("/api/moments/labels/delete", { id: g.id });
+  if (!res.ok) { notify(res.msg || "删除失败", "warning"); return; }
+  if (gState.editing === g.id) setEditingGroup(null);
+  await loadGroups();
+}
+
+async function applyLabelNotice(item, mode) {
+  if (mode === "sync" && item.edited) {
+    const go = await askConfirm({
+      title: "用微信名单覆盖本地？",
+      message: `同步会用微信的名单覆盖本地改动。`,
+      okText: "确认", cancelText: "取消", danger: false,
+    });
+    if (!go) return;
+  }
+  const res = await api("/api/moments/labels/apply", { id: item.id, mode });
+  if (!res.ok) { notify(res.msg || "操作失败", "warning"); return; }
+  await loadGroups();
+  notify(mode === "sync"
+    ? `「${item.name}」已同步`
+    : `「${item.name}」已忽略变化`, "success");
+}
+
+async function convertLabel(item) {
+  const res = await api("/api/moments/labels/convert", { id: item.id });
+  if (!res.ok) { notify(res.msg || "转换失败", "warning"); return; }
+  await loadGroups();
+  notify(`「${item.name}」已转为分组`, "success");
 }
 
 async function exportGroup(g) {
@@ -552,47 +892,68 @@ async function exportGroup(g) {
 
 function editGroup(g) {
   mState.picked = new Set(g.members.map((m) => m.wxid));
-  gState.editing = g.id;
+  setEditingGroup(g.id, "custom");
   $("m-group-name").value = g.name || groupName(g);
   $("m-keep").checked = !!g.keep_interactions;
   $("m-group-split").checked = !!g.split;
   renderFriends();
   updateFriendCount();
   switchFilterTab("friends");
-  notify(`正在编辑分组「${groupName(g)}」：改完勾选后点「保存为分组」`, "info");
   refreshTimeline();
 }
 
 async function deleteGroup(g) {
-  if (!confirm(`删除分组「${groupName(g)}」？已导出的文件夹会保留。`)) return;
+  const go = await askConfirm({
+    title: "确认删除？",
+    message: `删除分组「${groupName(g)}」？`,
+    okText: "确认", cancelText: "取消",
+  });
+  if (!go) return;
   const res = await api("/api/moments/groups/delete", { id: g.id });
   if (!res.ok) { notify(res.msg || "删除失败", "warning"); return; }
-  if (gState.editing === g.id) gState.editing = null;
+  if (gState.editing === g.id) setEditingGroup(null);
   await loadGroups();
 }
 
 $("m-group-save").onclick = async () => {
   const name = $("m-group-name").value.trim();
-  if (!name) { notify("请先填写分组名称", "warning"); return; }
-  if (!mState.picked.size) { notify("请至少勾选一位好友", "warning"); return; }
+  if (!name) { notify("填写分组名称", "warning"); return; }
+  if (!mState.picked.size) { notify("至少选择一位好友", "warning"); return; }
+  const usernames = [...mState.picked];
+  if (gState.editing && gState.editingMode === "label") {
+    const res = await api("/api/moments/labels/save",
+      { id: gState.editing, name, usernames });
+    if (!res.ok) { notify(res.msg || "保存失败", "warning"); return; }
+    setEditingGroup(null);
+    $("m-group-name").value = "";
+    await loadGroups();
+    switchFilterTab("groups");
+    notify(`已保存标签「${name}」 · ${res.count} 位好友`, "success");
+    return;
+  }
   const payload = {
     name,
-    usernames: [...mState.picked],
+    usernames,
     keep_interactions: $("m-keep").checked,
     split: $("m-group-split").checked,
   };
-  if (gState.editing) payload.id = gState.editing;
+  const editing = gState.editingMode === "custom" ? gState.editing : null;
+  if (editing) payload.id = editing;
   const res = await api("/api/moments/groups/save", payload);
   if (!res.ok) { notify(res.msg || "保存失败", "warning"); return; }
-  gState.editing = null;
+  setEditingGroup(null);
   $("m-group-name").value = "";
   await loadGroups();
   switchFilterTab("groups");
-  notify(`已保存分组「${name}」`, "success");
+  notify(editing ? `已更新分组「${name}」` : `已保存分组「${name}」`, "success");
 };
 
 $("fm-tab-friends").onclick = () => switchFilterTab("friends");
 $("fm-tab-groups").onclick = () => switchFilterTab("groups");
+$("m-label-sync-all").onclick = syncAllLabels;
+$("m-group-split").onchange = () => {
+  if (!$("m-filter-overlay").hidden && !$("fm-pane-groups").hidden) renderGroups();
+};
 
 let lastCoverageSignature = "";
 function shiftDate(value, days) {
@@ -614,7 +975,7 @@ function coveragePeriods(report) {
 function fillCoverage(box, report) {
   box.replaceChildren();
   if (!report) {
-    box.textContent = "请先刷新，再查看朋友圈缺失时间段。";
+    box.textContent = "";
     return;
   }
   const range = document.createElement("div");
@@ -653,7 +1014,7 @@ function renderCoverage(report) {
   const link = document.createElement("button");
   link.className = "ghost";
   link.textContent = "查看完整日志";
-  link.onclick = () => { floating.close("coverage"); openSupport("logs"); };
+  link.onclick = () => { floating.close("coverage"); openSupport(); };
   popup.body.append(link);
   floating.finish(popup, 8000);
 }
@@ -665,7 +1026,7 @@ async function refreshTimeline() {
   const sv = $("m-start").value;
   const ev = $("m-end").value;
   if (sv && ev && ev < sv) {
-    notify("结束日期必须晚于开始日期", "warning");
+    notify("结束日期需晚于开始日期", "warning");
     return;
   }
   const res = await api("/api/moments/timeline", {
@@ -900,7 +1261,7 @@ $("m-export").onclick = async () => {
     .map((i) => mState.posts[i])
     .filter(Boolean)
     .map((p) => ({ createTime: p.createTime, username: p.username }));
-  if (!picked.length) { notify("所选条目无效，请重新勾选"); return; }
+  if (!picked.length) { notify("所选条目无效"); return; }
   const res = await api("/api/export", {
     type: "moments",
     picked,
@@ -1011,7 +1372,7 @@ function renderContactTable() {
             await navigator.clipboard.writeText(v);
             notify("头像链接已复制", "success");
           } catch (e) {
-            notify("复制失败，请检查浏览器的剪贴板权限。");
+            notify("复制失败");
           }
         };
         wrap.append(btn);
@@ -1035,7 +1396,7 @@ $("c-search").addEventListener("input", () => { cState.page = 0; renderContactTa
 
 $("c-export").onclick = async () => {
   const cols = cState.columns;
-  if (!cols.length) { notify("请至少勾选一列再导出", "warning"); return; }
+  if (!cols.length) { notify("至少选择一列", "warning"); return; }
   $("c-export").disabled = true;
   const popup = floating.open("contacts-export", "正在导出好友列表…");
   try {
@@ -1045,7 +1406,7 @@ $("c-export").onclick = async () => {
     popup.card.dataset.level = "success";
     popup.body.textContent = `${res.count} 人 · 保存到 ${res.path}`;
     floating.finish(popup, 4000);
-  } catch (error) { /* The API helper displays the error. */ }
+  } catch (error) { }
   finally {
     if (!popup.remaining) floating.close("contacts-export");
     $("c-export").disabled = cState.columns.length === 0;
@@ -1135,7 +1496,7 @@ async function loadAuthor() {
   }
   if (res.need_open) {
     $("author-count").textContent = "已收录 0 篇";
-    notify(res.msg || "先在微信中点开该公众号的文章，会自动收录。", "warning");
+    notify(res.msg || "先在微信里点开该公众号的文章", "warning");
     state.articles = [];
     startWatch();
     return;
@@ -1145,7 +1506,6 @@ async function loadAuthor() {
   $("author-count").innerHTML =
     '<span class="live-dot"></span>正在监听微信 · 已收录 ' +
     state.articles.length + " 篇";
-  notify("列表只含已点开过的文章。在微信继续点开该公众号的文章，列表会自动更新。", "info");
   renderList();
   startWatch();
 }
@@ -1163,7 +1523,7 @@ async function startWatch() {
     const res = await api("/api/author/watch/start", { biz });
     if (!res.ok || generation !== watchGeneration) return;
     state.watchPoll = setTimeout(watchPoll, 3000);
-  } catch (error) { /* The API helper displays the error. */ }
+  } catch (error) { }
 }
 
 async function watchPoll() {
@@ -1256,7 +1616,7 @@ function renderList() {
 
     btn.disabled = !a.title;
     if (a.title) btn.className = "primary";
-    btn.title = a.title ? "下载这篇文章" : "正在解析标题，稍等片刻即可下载";
+    btn.title = "下载";
     btn.onclick = (e) => { e.stopPropagation(); downloadOne(i); };
 
     row.append(t, d, btn);
@@ -1409,13 +1769,12 @@ $("btn-download-all").onclick = async () => {
   startJob(res.job, `下载全部 ${state.articles.length} 篇`, res.dir || "");
 };
 
-// Initialize after all state objects exist (including contacts and author state).
 restoreMoments();
 pollDiagnostics();
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") { closeFilter(); show($("pd-overlay"), false); closeSupport(); }
   if (event.key === "Tab" && !$("support-overlay").hidden) {
-    const focusable = [...$("support-overlay").querySelectorAll("button:not(:disabled), summary, [tabindex='0']")]
+    const focusable = [...$("support-overlay").querySelectorAll("button:not(:disabled), [tabindex='0']")]
       .filter((element) => element.getClientRects().length);
     const first = focusable[0], last = focusable[focusable.length - 1];
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }

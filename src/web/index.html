@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>微信数据导出工具</title>
-<link rel="stylesheet" href="/static/style.css?v=27">
+<link rel="stylesheet" href="/static/style.css?v=34">
 </head>
 <body>
 <div class="app">
@@ -24,7 +24,6 @@
       </div>
     </div>
     <div class="top-actions">
-      <button class="ghost" id="btn-help">帮助</button>
       <button class="ghost" id="btn-logs">查看日志</button>
       <button class="ghost" id="btn-output">打开输出目录</button>
     </div>
@@ -71,7 +70,7 @@
 
     <div class="bar">
       <input id="url" type="text" spellcheck="false" autocomplete="off"
-             placeholder="粘贴公众号文章链接，例如 https://mp.weixin.qq.com/s/xxxxx">
+             placeholder="文章链接">
       <button class="primary" id="btn-parse">解析</button>
     </div>
 
@@ -127,7 +126,7 @@
 
       <div class="c-bar">
         <input id="c-search" type="text" spellcheck="false"
-               placeholder="搜索好友（备注 / 昵称 / 微信号 / wxid）">
+               placeholder="搜索好友">
         <span class="muted" id="c-count"></span>
       </div>
 
@@ -170,14 +169,17 @@
         </div>
         <div class="m-friend-list" id="m-friend-list"></div>
 
-        <div class="fm-group-save">
+        <div class="fm-group-save" id="fm-group-save">
           <input id="m-group-name" type="text" spellcheck="false" maxlength="40"
-                 placeholder="把当前勾选存为分组，例如：家人">
+                 placeholder="分组名称">
           <button id="m-group-save">保存为分组</button>
         </div>
       </div>
 
       <div id="fm-pane-groups" hidden>
+        <div class="mg-tools">
+          <button class="ghost" id="m-label-sync-all">检查微信标签更新</button>
+        </div>
         <div class="mg-list" id="m-groups-list"></div>
       </div>
 
@@ -200,19 +202,11 @@
   <div class="overlay" id="support-overlay" hidden>
     <div class="support-modal" role="dialog" aria-modal="true" aria-labelledby="support-title" tabindex="-1">
       <div class="fm-head">
-        <strong id="support-title">帮助</strong>
+        <strong id="support-title">查看日志</strong>
         <button class="fm-close" id="support-close" aria-label="关闭">✕</button>
       </div>
-      <div id="help-body" class="support-body" hidden>
-        <details open>
-          <summary>朋友圈导出不完整？</summary>
-          <p>该工具只能识别你在这台电脑上曾经浏览过的朋友圈。</p>
-          <p>如果你从未在这台电脑上浏览过某条朋友圈：目前仍有权限的话，现在去浏览一次，再点击「刷新」即可识别；如果已经没有权限，就永远无法识别。</p>
-          <p>因此，想导出朋友圈全量快照：在这台电脑上打开朋友圈，一路向下翻，只要翻到过，工具就一定能识别。若只关心几位好友，打开他们的个人主页和置顶朋友圈，同样一路向下翻。翻完点击「刷新」即可。</p>
-        </details>
-      </div>
       <div id="logs-body" class="support-body" hidden>
-        <div class="support-toolbar"><span class="muted">以最近成功刷新的全量朋友圈为准</span><button class="ghost" id="logs-refresh">刷新日志</button></div>
+        <div class="support-toolbar"><button class="ghost" id="logs-refresh">刷新日志</button></div>
         <div id="logs-coverage"></div>
         <div class="log-file-row">
           <span class="muted">完整日志：<code id="logs-file"></code></span>
@@ -221,8 +215,18 @@
       </div>
     </div>
   </div>
+  <div class="overlay" id="ask-overlay" hidden>
+    <div class="ask-modal" role="dialog" aria-modal="true" aria-labelledby="ask-title">
+      <strong class="ask-title" id="ask-title">确认删除？</strong>
+      <p class="ask-text" id="ask-text"></p>
+      <div class="ask-foot">
+        <button class="ghost" id="ask-cancel">取消</button>
+        <button class="danger" id="ask-ok">确认</button>
+      </div>
+    </div>
+  </div>
 </div>
-<script src="/static/floating.js?v=1"></script>
-<script src="/static/app.js?v=39"></script>
+<script src="/static/floating.js?v=4"></script>
+<script src="/static/app.js?v=52"></script>
 </body>
 </html>

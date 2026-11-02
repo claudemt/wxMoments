@@ -1,7 +1,3 @@
-"""Named constants for wxMoments.
-
-Centralize all magic number and string literals used across the codebase.
-"""
 
 from __future__ import annotations
 

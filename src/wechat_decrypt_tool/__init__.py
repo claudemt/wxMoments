@@ -1,7 +1,3 @@
-"""wxMoments — WeChat Moments export tool.
-
-Public API surface for internal modules.
-"""
 
 from __future__ import annotations
 

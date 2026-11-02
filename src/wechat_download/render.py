@@ -1,9 +1,3 @@
-"""正文清洗 + Markdown 渲染 + HTML 模板。
-
-原则：只保留核心文字与图片。
-文章末尾的点赞/在看/分享/赞赏/关注引导/二维码/推荐阅读等模块一律不进入正文，
-因为正文只取 #js_content，文末模块本来就在它外面；这里再做一次保险的清洗。
-"""
 from __future__ import annotations
 
 import html as _html
@@ -63,7 +57,6 @@ def _is_junk(tag: Tag) -> bool:
 
 
 def clean_content(node: Tag) -> str:
-    """清洗 #js_content，返回不可信但干净的 HTML 片段。"""
     soup = BeautifulSoup(str(node), "lxml")
     node = soup.select_one("#js_content")
     if node is None:  

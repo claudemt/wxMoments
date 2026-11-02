@@ -1,4 +1,3 @@
-"""全局配置与路径（已并入 wxMoments 合并项目）。"""
 from pathlib import Path
 
 

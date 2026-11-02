@@ -1,4 +1,3 @@
-"""Bounded browser diagnostics and background jobs, without console handlers."""
 from __future__ import annotations
 
 import logging
@@ -64,7 +63,6 @@ class BrowserLogHandler(logging.Handler):
             _EVENTS.append({
                 "id": _CURSOR, "time": datetime.now().strftime("%H:%M:%S"),
                 "level": record.levelname, "message": message,
-                # Only explicitly written user messages become floating notices.
                 "notice": getattr(record, "browser_notice", ""),
                 "job": getattr(record, "job_id", job.id if job else ""),
             })
@@ -87,7 +85,6 @@ def diagnostics(after: int = 0) -> dict:
 def start_job(total: int, target, *args) -> Job:
     job = Job(total)
     with _LOCK:
-        # Retain all running jobs and the latest 80 completed jobs.
         completed = [key for key, value in JOBS.items() if value.status != "running"]
         for key in completed[:-79]:
             JOBS.pop(key, None)

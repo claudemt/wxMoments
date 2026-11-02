@@ -1,4 +1,3 @@
-"""导出编排：把一篇文章落成 <html / md / figures> 三样东西。"""
 from __future__ import annotations
 
 import re
@@ -40,7 +39,6 @@ def article_dir_name(art: wechat.Article) -> str:
 
 def export_article(art: wechat.Article, root: Path | None = None,
                    progress=None, cancel_check=None) -> ExportResult:
-    """把文章导出到 root/<公众号名>-<文章名>/ 下。只导出正文。"""
     root = Path(root or OUTPUT_DIR)
     if cancel_check:
         cancel_check()
@@ -58,7 +56,6 @@ def export_article(art: wechat.Article, root: Path | None = None,
     failed = 0
 
     def localize(src: str) -> str:
-        """把一个远端图片地址下载到 figures/，返回本地相对路径。"""
         nonlocal failed
         if src in url_map:
             return url_map[src]

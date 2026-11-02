@@ -466,7 +466,6 @@ _WECHAT_EMOJI_SHORTCODE_RE = re.compile(r"\[([^\[\]]{1,32})\]")
 
 
 def emojify_wechat_shortcodes(text: str) -> str:
-    """Replace WeChat built-in [shortcode] tokens with close Unicode emoji."""
     if not text:
         return text
 

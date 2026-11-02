@@ -1,5 +1,6 @@
-﻿beautifulsoup4
+beautifulsoup4
 cryptography
+comtypes; platform_system == "Windows"
 fastapi
 httpx
 lxml
@@ -13,5 +14,6 @@ pywin32; platform_system == "Windows"
 reportlab
 requests
 uvicorn
+uiautomation; platform_system == "Windows"
 yara-python; platform_system == "Windows"
 zstandard

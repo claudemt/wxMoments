@@ -1,4 +1,3 @@
-// Shared floating windows for messages and work in progress.
 const floating = (() => {
   const entries = new Map();
   const durations = { success: 3000, info: 4000, warning: 8000, error: 6000 };
@@ -68,7 +67,6 @@ const floating = (() => {
       if (!entry.focused) resume(entry);
     });
     entries.set(key, entry);
-    // Keep active work visible; bound bursts of informational messages.
     const notices = [...entries.values()].filter((item) => item.remaining > 0);
     for (const item of notices.slice(0, Math.max(0, notices.length - 4))) close(item.key);
     document.getElementById("floating-windows").append(card);
@@ -84,5 +82,16 @@ const floating = (() => {
     return entry;
   }
 
-  return { open, close, finish, message };
+  function pin(entry) {
+    if (!entry) return entry;
+    clearTimeout(entry.timer);
+    entry.timer = null;
+    entry.remaining = 0;
+    entry.closeButton.hidden = false;
+    const box = entry.card.parentElement;
+    if (box) box.scrollTop = box.scrollHeight;
+    return entry;
+  }
+
+  return { open, close, finish, pin, message };
 })();

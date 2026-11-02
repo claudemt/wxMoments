@@ -1,7 +1,3 @@
-"""统一网页服务：朋友圈导出 + 公众号文章导出。http://127.0.0.1:8756
-
-由 wechatDownload（公众号文章）与 wxMoments（朋友圈）合并而来。
-"""
 from __future__ import annotations
 
 import asyncio
@@ -38,6 +34,7 @@ os.environ["WECHAT_TOOL_ENABLE_CONSOLE_LOG"] = "0"
 from wechat_download import exporter, harvest, wechat
 from wechat_download.config import HOST, OUTPUT_DIR, PORT, PROXY_PORT, WEB_DIR
 import wxmoments
+import wechat_labels
 from author_watch import AuthorWatch
 from web_runtime import Job, JOBS as _JOBS, start_job, diagnostics, install_browser_logging
 from wechat_decrypt_tool.modules.logging_config import get_logger
@@ -62,10 +59,14 @@ _ARTICLE_CACHE: dict[str, wechat.Article] = {}
 @app.middleware("http")
 async def browser_errors(request, call_next):
     try:
-        return await call_next(request)
+        response = await call_next(request)
     except Exception as exc:
         logger.exception("请求失败：%s %s", request.method, request.url.path)
         return JSONResponse({"ok": False, "msg": f"操作失败：{exc}"}, status_code=500)
+    path = request.url.path
+    if path == "/" or path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
 
 
 @app.get("/api/diagnostics")
@@ -89,7 +90,6 @@ async def api_logs():
 
 @app.post("/api/logs/open")
 async def api_logs_open():
-    """用系统默认程序打开日志文件，方便查看完整记录。"""
     try:
         path = wxmoments.get_log_file_path()
     except Exception:
@@ -241,7 +241,6 @@ def _start_moments_group_export(payload: dict) -> dict:
 
 
 def _start_moments_group_export_locked(payload: dict) -> dict:
-    """按分组导出：每位好友一个子文件夹，写进固定的 output/组名/ 。"""
     global _MOMENTS_EXPORT_JOB
     if _INIT_JOB and _INIT_JOB.status == "running":
         return {"ok": False, "msg": "正在解密，请等待完成后再导出"}
@@ -254,9 +253,33 @@ def _start_moments_group_export_locked(payload: dict) -> dict:
             return {"ok": False, "msg": "请先点击「刷新」"}
 
         gid = str(payload.get("id") or "").strip()
-        group = next((g for g in _group_records() if g.get("id") == gid), None)
-        if group is None:
-            return {"ok": False, "msg": "分组不存在，请重新保存"}
+        contact_names = _contact_names()
+        label_record: dict[str, Any] | None = None
+        if wechat_labels.is_label_group_id(gid):
+            store = wechat_labels.load_store(_labels_path())
+            records = wechat_labels.label_records(store, _current_account())
+            label_id = wechat_labels.label_id_from_group(gid)
+            label_record = next((r for r in records if str(r.get("id")) == label_id), None)
+            if label_record is None:
+                return {"ok": False, "msg": "标签不存在"}
+            group = wechat_labels.export_group(label_record, records=records,
+                                               contact_names=contact_names)
+            group["split"] = bool(payload.get("split"))
+            group["keep_interactions"] = bool(payload.get("keep_interactions"))
+            if not group.get("members"):
+                return {"ok": False, "msg": "标签里没有好友"}
+            if group.get("status") not in ("ok", "empty") and not payload.get("allow_partial"):
+                return {
+                    "ok": False,
+                    "need_confirm": True,
+                    "status": group.get("status"),
+                    "msg": f"标签「{group['name']}」只读到 {len(group['members'])} 人，仍要导出？",
+                    "matched": len(group["members"]),
+                }
+        else:
+            group = next((g for g in _group_records() if g.get("id") == gid), None)
+            if group is None:
+                return {"ok": False, "msg": "分组不存在，请重新保存"}
         if not group.get("members"):
             return {"ok": False, "msg": "该分组没有好友"}
 
@@ -291,10 +314,8 @@ def _run_single(job: Job, art: wechat.Article) -> None:
 
 
 HARVEST_TIP = (
-    "微信缓存里还没有这个公众号的文章记录。\n"
-    "请在微信里打开该公众号的「历史消息」页，把里面的每一篇文章都点开一遍"
-    "（点开即可，可以立刻按 Ctrl+W 关掉）。\n"
-    "这边会自动收录，列表实时变多，点完直接勾选下载。"
+    "微信缓存里还没有这个公众号的文章。\n"
+    "请在微信里打开该公众号的「历史消息」，逐篇点开。"
 )
 
 
@@ -337,7 +358,7 @@ async def api_author_watch_start(payload: dict):
         return {"ok": False, "msg": "缺少公众号 ID"}
     watch = _AUTHOR_WATCH.setdefault(biz, AuthorWatch(biz, _load_article))
     if not watch.start():
-        return {"ok": False, "msg": "上次收录正在停止，请稍后重试"}
+        return {"ok": False, "msg": "收录正在停止，稍后再试"}
     return watch.snapshot()
 
 
@@ -357,7 +378,6 @@ async def api_author_watch_stop(payload: dict):
 
 
 def _batch_root(account: str, mode: str) -> Path:
-    """下载目录：全部 → output/<公众号名>-<导出日期>/ ；选中/单篇 → output/。"""
     if mode == "all":
         return OUTPUT_DIR / f"{exporter.safe_name(account, 30)}-{datetime.now():%Y%m%d}"
     return OUTPUT_DIR
@@ -365,11 +385,6 @@ def _batch_root(account: str, mode: str) -> Path:
 
 def _run_batch(job: Job, articles: list[dict], account: str, mode: str,
                biz: str = "") -> None:
-    """mode=all → output/<公众号名>-<导出日期>/ ；mode=select → output/。
-
-    批量导出（不止一篇）完成后在产物根目录写一份 export_meta.json，
-    记录导出时间、总数量、每篇的标题/链接/发表时间。单篇导出不写。
-    """
     root = _batch_root(account, mode)
     root.mkdir(parents=True, exist_ok=True)
     job.add_log(f"共 {job.total} 篇文章，保存到 {root}")
@@ -425,6 +440,9 @@ _MOMENTS: dict[str, Any] = {"account_info": None, "account_dir": None}
 _INIT_LOCK = threading.Lock()
 _INIT_JOB: Job | None = None
 _MOMENTS_EXPORT_JOB: Job | None = None
+_LABEL_LOCK = threading.Lock()
+_LABEL_JOB: Job | None = None
+_LABEL_SYNC_LOCK = threading.Lock()
 
 
 def _parse_moments_filters(payload: dict):
@@ -473,7 +491,6 @@ def _group_records() -> list[dict[str, Any]]:
 
 
 def _save_group_records(records: list[dict[str, Any]]) -> None:
-    """按账号整体替换：保留其他账号的分组。"""
     data = wxmoments.load_groups(_groups_path())
     account = _current_account()
     others = [g for g in data["groups"]
@@ -494,6 +511,17 @@ def _touch_group_export(group_id: str) -> None:
     _save_group_records(records)
 
 
+def _mark_label_export(label_id: str, total_posts: int) -> None:
+    with _LABEL_LOCK:
+        store = wechat_labels.load_store(_labels_path())
+        record = next((r for r in wechat_labels.label_records(store, _current_account())
+                       if str(r.get("id")) == str(label_id)), None)
+        if record is None:
+            return
+        wechat_labels.mark_exported(record, total_posts)
+        wechat_labels.save_store(_labels_path(), store)
+
+
 def _group_total_posts(group: dict) -> int:
     total = 0
     for m in group.get("members") or []:
@@ -505,8 +533,89 @@ def _group_total_posts(group: dict) -> int:
     return total
 
 
+def _labels_path() -> Path:
+    return _output_root() / "moments_labels.json"
+
+
+def _label_records() -> list[dict[str, Any]]:
+    return wechat_labels.label_records(wechat_labels.load_store(_labels_path()), _current_account())
+
+
+def _post_counts() -> dict[str, int]:
+    counts: dict[str, int] = {}
+    self_variants = _MOMENTS.get("self_variants") or set()
+    for post in _MOMENTS.get("posts") or []:
+        username = str(post.get("username") or "").strip()
+        if not username or username in self_variants:
+            continue
+        counts[username] = counts.get(username, 0) + 1
+    return counts
+
+
+def _label_views() -> dict[str, Any]:
+    account = _current_account()
+    if not account:
+        return {"labels": [], "label_state": {"available": False, "reason": "请先点击「刷新」"}}
+    store = wechat_labels.load_store(_labels_path())
+    records = wechat_labels.label_records(store, account)
+    meta = wechat_labels.account_record(store, account).get("definitions") or {}
+    names = _contact_names()
+    counts = _post_counts()
+    views = [wechat_labels.label_view(record, records=records, contact_names=names,
+                                     post_counts=counts) for record in records]
+    notices = []
+    for view in views:
+        if view.get("notice"):
+            notices.append({"id": view["id"], "kind": "pending", "name": view["name"],
+                            "text": view["notice"], "added": view["pending"]["added"],
+                            "removed": view["pending"]["removed"],
+                            "edited": view.get("edited_locally")})
+        elif view.get("deleted_notice"):
+            notices.append({"id": view["id"], "kind": "deleted", "name": view["name"],
+                            "text": view["deleted_notice"]})
+    return {
+        "labels": views,
+        "label_notices": notices,
+        "label_state": {
+            "available": bool(views),
+            "member_source": meta.get("membership") or "none",
+            "updated": str(meta.get("read_at") or ""),
+            "reason": "" if views else "还没有读到微信标签，点击「刷新」后再试",
+        },
+    }
+
+
+def _refresh_label_definitions(account: str, account_dir: Path,
+                               contacts: list[Any],
+                               definitions: Any = None) -> dict[str, Any]:
+    try:
+        if definitions is None:
+            definitions = wechat_labels.read_label_definitions(Path(account_dir))
+    except Exception as exc:
+        logger.warning("读取微信标签定义失败：%s", exc)
+        return {"ok": False, "reason": str(exc), "count": 0}
+    if not definitions.available:
+        logger.info("未读取到微信标签定义：%s", definitions.reason)
+        return {"ok": False, "reason": definitions.reason, "count": 0}
+    with _LABEL_LOCK:
+        store = wechat_labels.load_store(_labels_path())
+        merged = wechat_labels.merge_definitions(store, account, definitions, contacts)
+        db = wechat_labels.apply_db_membership(store, account, definitions, contacts)
+        wechat_labels.save_store(_labels_path(), store)
+    return {
+        "ok": bool(merged.get("ok")),
+        "count": int(merged.get("count") or 0),
+        "membership": definitions.membership,
+        "imported": int(db.get("imported") or 0),
+        "imported_names": merged.get("imported") or [],
+        "removed_names": merged.get("removed") or [],
+        "renamed": merged.get("renamed") or [],
+        "pending": db.get("pending") or [],
+        "reason": "" if merged.get("ok") else str(merged.get("reason") or ""),
+    }
+
+
 def _moments_acquire_key(account_info: wxmoments.AccountInfo) -> str:
-    """网页版密钥获取：config → 本地已存 → 自动读取（微信须已登录前台）。"""
     config = _moments_config()
     key = (str(config.get("db_key") or "") or os.environ.get("WXMOMENTS_KEY", "")).strip()
     if key:
@@ -526,7 +635,6 @@ def _moments_acquire_key(account_info: wxmoments.AccountInfo) -> str:
 
 @app.post("/api/moments/init")
 async def api_moments_init(payload: dict):
-    """初始化解密为后台任务（定位→密钥→解密→预读数据），前端轮询进度。"""
     global _INIT_JOB
     with _INIT_LOCK:
         if _INIT_JOB and _INIT_JOB.status == "running":
@@ -554,8 +662,10 @@ def _run_moments_init(job: Job) -> None:
         key = _moments_acquire_key(account_info)
 
         job.message = "读取最新微信缓存…"
-        account_dir = wxmoments.decrypt_databases(account_info, key)
+        account_dir, decrypt_stale = wxmoments.decrypt_databases(account_info, key)
         wxmoments.save_db_key(account_info, account_dir, key)
+        if decrypt_stale:
+            job.add_log(decrypt_stale)
 
         job.message = "读取朋友圈数据…"
         posts = wxmoments.load_timeline(account_dir, None)
@@ -574,18 +684,38 @@ def _run_moments_init(job: Job) -> None:
         for username in self_set:
             names.setdefault(username, "我")
         coverage = wxmoments.build_coverage_report(posts, posts, None, None)
-        # Publish a complete snapshot only after every initialization step succeeds.
         _MOMENTS = {"account_info": account_info, "account_dir": account_dir,
                     "posts": posts, "contacts": contacts, "self_variants": self_set,
                     "contact_names": names, "coverage": coverage}
         for warning in coverage["warnings"]:
             job.add_log(warning)
 
+        label_info = _refresh_label_definitions(account_info.account, account_dir, contacts)
+        if label_info.get("ok"):
+            job.add_log(f"微信标签：{label_info.get('count')} 个")
+            for name in label_info.get("imported_names") or []:
+                job.add_log(f"新标签「{name}」已导入")
+            for name in label_info.get("removed_names") or []:
+                job.add_log(f"标签「{name}」已在微信删除")
+            for item in label_info.get("pending") or []:
+                detail = []
+                if item.get("added"):
+                    detail.append(f"增添了 {'、'.join(item['added'])}")
+                if item.get("removed"):
+                    detail.append(f"删除了 {'、'.join(item['removed'])}")
+                if detail:
+                    job.add_log(f"「{item.get('name')}」{'，'.join(detail)}")
+            if label_info.get("membership") != "db":
+                _start_label_autosync(job, account_info.account, Path(account_dir))
+        elif label_info.get("reason"):
+            job.add_log(f"标签未读取：{label_info['reason']}")
+
         job.done = 1
         job.message = f"刷新完成：{account_info.account} · 朋友圈 {len(posts)} 条"
         job.results.append({
             "account": account_info.account,
             "posts": len(posts),
+            "labels": int(label_info.get("count") or 0),
         })
         job.finish("done", job.message)
     except Exception as exc:
@@ -601,8 +731,6 @@ def _moments_ready() -> Path:
 
 def _moments_filtered_posts(usernames: list[str] | None,
                             start, end) -> list[dict[str, Any]]:
-    """从内存缓存过滤朋友圈（好友 + 时间）。
-    usernames=None → 全部；[] → 0 条（什么都没选）。"""
     posts = _MOMENTS.get("posts") or []
     if usernames is not None:
         wanted = set(usernames)
@@ -628,13 +756,13 @@ def _moments_filtered_posts(usernames: list[str] | None,
 
 @app.get("/api/moments/status")
 async def api_moments_status():
-    """当前会话是否已解密封装（供前端刷新后自动恢复列表）。"""
     ai = _MOMENTS.get("account_info")
     posts = _MOMENTS.get("posts") or []
     return {
         "ok": True,
         "ready": bool(ai and _MOMENTS.get("account_dir")),
         "init_job": _INIT_JOB.id if _INIT_JOB and _INIT_JOB.status == "running" else "",
+        "label_job": _LABEL_JOB.id if _LABEL_JOB and _LABEL_JOB.status == "running" else "",
         "coverage": _MOMENTS.get("coverage"),
         "account": ai.account if ai else "",
         "total": len(posts),
@@ -643,7 +771,6 @@ async def api_moments_status():
 
 @app.post("/api/moments/contacts")
 async def api_moments_contacts(payload: dict):
-    """好友列表 = 本机朋友圈数据里实际出现过的用户（仅聊天/无数据者不出现）。"""
     try:
         _moments_ready()
         contacts = _MOMENTS.get("contacts") or []
@@ -678,7 +805,6 @@ async def api_moments_contacts(payload: dict):
 
 
 def _group_view(record: dict[str, Any]) -> dict[str, Any]:
-    """给前端的展示数据：成员补上当前显示名，附上条数与未读新条数。"""
     names = _contact_names()
     members = []
     for m in record.get("members") or []:
@@ -704,16 +830,297 @@ def _group_view(record: dict[str, Any]) -> dict[str, Any]:
 
 @app.post("/api/moments/groups")
 async def api_moments_groups(payload: dict):
-    """列出当前账号保存的好友分组。"""
     try:
-        return {"ok": True, "groups": [_group_view(g) for g in _group_records()]}
+        return {"ok": True, "groups": [_group_view(g) for g in _group_records()],
+                **_label_views()}
+    except Exception as exc:
+        return {"ok": False, "msg": str(exc)}
+
+
+def _labels_sync_enabled() -> bool:
+    return _moments_config().get("wechat_label_uia", True) is not False
+
+
+def _start_label_autosync(job: Job, account: str, account_dir: Path) -> Job | None:
+    global _LABEL_JOB
+    if not _labels_sync_enabled():
+        return None
+    if _LABEL_JOB and _LABEL_JOB.status == "running":
+        return _LABEL_JOB
+    try:
+        records = wechat_labels.label_records(wechat_labels.load_store(_labels_path()), account)
+        pending = [str(r.get("id")) for r in records if wechat_labels.needs_sync(r, auto=True)]
+    except Exception as exc:
+        job.add_log(f"标签成员自动同步跳过：{exc}")
+        return None
+    if not pending:
+        return None
+    job.add_log(f"正在自动读取 {len(pending)} 个微信标签的成员…")
+    _LABEL_JOB = start_job(len(pending), _run_label_sync, account, Path(account_dir), pending)
+    return _LABEL_JOB
+
+
+def _label_total_posts(record: dict[str, Any]) -> int:
+    counts = _post_counts()
+    return sum(counts.get(str(m.get("wxid") or ""), 0) for m in record.get("members") or [])
+
+
+def _refresh_contact_snapshot(account_info: Any, account_dir: Path) -> tuple[Path, str]:
+    if account_info is None:
+        return account_dir, ""
+    try:
+        key = _moments_acquire_key(account_info)
+        fresh, stale = wxmoments.decrypt_contact_db(account_info, key)
+    except Exception as exc:
+        logger.warning("重新解密通讯录失败：%s", exc)
+        return account_dir, str(exc)
+    try:
+        contacts = wxmoments.load_contact_entries(fresh)
+    except Exception as exc:
+        logger.warning("重新读取好友名单失败：%s", exc)
+        contacts = []
+    if contacts:
+        names = wxmoments.build_contact_display_names(contacts)
+        for username in _MOMENTS.get("self_variants") or set():
+            names.setdefault(username, "我")
+        _MOMENTS["contacts"] = contacts
+        _MOMENTS["contact_names"] = names
+    _MOMENTS["account_dir"] = fresh
+    return fresh, stale
+
+
+@app.post("/api/moments/labels/sync")
+async def api_moments_labels_sync(payload: dict):
+    global _LABEL_JOB
+    try:
+        account = _current_account()
+        account_dir = _MOMENTS.get("account_dir")
+        if not account or not account_dir:
+            return {"ok": False, "msg": "请先点击「刷新」"}
+        if not _labels_sync_enabled():
+            return {"ok": False, "msg": "配置中已关闭标签同步"}
+        if _LABEL_JOB and _LABEL_JOB.status == "running":
+            return {"ok": True, "job": _LABEL_JOB.id}
+        if _INIT_JOB and _INIT_JOB.status == "running":
+            return {"ok": False, "msg": "正在刷新，稍后再试"}
+        if _MOMENTS_EXPORT_JOB and _MOMENTS_EXPORT_JOB.status == "running":
+            return {"ok": False, "msg": "正在导出朋友圈，请等待完成或取消"}
+
+        records = [r for r in _label_records() if r.get("present", True)]
+        target = str(payload.get("id") or "").strip()
+        if wechat_labels.is_label_group_id(target):
+            only = [wechat_labels.label_id_from_group(target)]
+        elif payload.get("all"):
+            only = [str(r.get("id")) for r in records]
+        else:
+            only = [str(r.get("id")) for r in records
+                    if r.get("status") in (wechat_labels.STATUS_NEVER, wechat_labels.STATUS_ERROR)]
+
+        fresh_dir, stale_reason = await run_in_threadpool(
+            _refresh_contact_snapshot, _MOMENTS.get("account_info"), Path(account_dir))
+        definitions = wechat_labels.read_label_definitions(fresh_dir)
+        if not definitions.available:
+            return {"ok": False, "msg": definitions.reason or "没能读取微信标签"}
+        if definitions.membership == "db":
+            info = _refresh_label_definitions(account, fresh_dir,
+                                              _MOMENTS.get("contacts") or [],
+                                              definitions=definitions)
+            pending = info.get("pending") or []
+            return {"ok": True, "mode": "db", "labels": info.get("count"),
+                    "imported": info.get("imported"),
+                    "pending": len(pending), "changed": len(pending),
+                    "imported_names": info.get("imported_names") or [],
+                    "removed_names": info.get("removed_names") or [],
+                    "renamed": info.get("renamed") or [],
+                    "stale": stale_reason}
+        if not only:
+            return {"ok": True, "mode": "uia", "job": "", "count": 0,
+                    "msg": "微信标签没有变化"}
+        _LABEL_JOB = start_job(len(only), _run_label_sync, account, fresh_dir, only)
+        return {"ok": True, "job": _LABEL_JOB.id, "count": len(only)}
+    except Exception as exc:
+        return {"ok": False, "msg": str(exc)}
+
+
+def _run_label_sync(job: Job, account: str, account_dir: Path, only_ids: list[str]) -> None:
+    from wechat_uia import UiaUnavailable, WechatLabelReader
+
+    if not _LABEL_SYNC_LOCK.acquire(blocking=False):
+        job.finish("error", "已有标签同步正在进行，请稍候")
+        return
+    try:
+        contacts = _MOMENTS.get("contacts") or []
+        job.message = "正在连接微信窗口…"
+        with WechatLabelReader(log=job.add_log, cancel=lambda: job.canceled,
+                               cache_dir=_labels_path().parent) as reader:
+            store = wechat_labels.load_store(_labels_path())
+            result = wechat_labels.sync_members(
+                store, account, contacts, reader, only_ids=only_ids,
+                log=job.add_log, progress=lambda done: setattr(job, "done", done),
+                canceled=lambda: job.canceled)
+            with _LABEL_LOCK:
+                wechat_labels.save_store(_labels_path(), store)
+        if job.canceled:
+            job.finish("canceled", "已取消标签同步")
+            return
+        if not result.get("ok") and not (result.get("synced") or result.get("partial")):
+            job.finish("error", str(result.get("msg") or "标签同步失败"))
+            return
+        job.done = job.total
+        job.results.append({"synced": result.get("synced", 0),
+                            "partial": result.get("partial", 0),
+                            "failed": result.get("failed", 0)})
+        job.finish("done", f"标签同步完成：完整 {result.get('synced', 0)} 个 · "
+                           f"不完整 {result.get('partial', 0)} 个 · "
+                           f"失败 {result.get('failed', 0)} 个")
+    except UiaUnavailable as exc:
+        job.add_log(f"标签同步不可用：{exc}")
+        job.finish("error", str(exc))
+    except Exception as exc:
+        job.finish("error", f"标签同步失败：{exc}")
+    finally:
+        _LABEL_SYNC_LOCK.release()
+
+
+@app.post("/api/moments/labels/seen")
+async def api_moments_labels_seen(payload: dict):
+    try:
+        label_id = wechat_labels.label_id_from_group(payload.get("id"))
+        if not label_id:
+            return {"ok": False, "msg": "缺少标签 ID"}
+        with _LABEL_LOCK:
+            store = wechat_labels.load_store(_labels_path())
+            record = next((r for r in wechat_labels.label_records(store, _current_account())
+                           if str(r.get("id")) == label_id), None)
+            if record is None:
+                return {"ok": False, "msg": "标签不存在"}
+            wechat_labels.mark_seen(record, _label_total_posts(record))
+            wechat_labels.save_store(_labels_path(), store)
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "msg": str(exc)}
+
+
+def _find_label(store: dict[str, Any], label_id: str) -> dict[str, Any] | None:
+    for record in wechat_labels.label_records(store, _current_account()):
+        if str(record.get("id")) == str(label_id):
+            return record
+    return None
+
+
+@app.post("/api/moments/labels/save")
+async def api_moments_labels_save(payload: dict):
+    try:
+        if not _current_account():
+            return {"ok": False, "msg": "请先点击「刷新」"}
+        label_id = wechat_labels.label_id_from_group(payload.get("id"))
+        if not label_id:
+            return {"ok": False, "msg": "缺少标签 ID"}
+        usernames = payload.get("usernames")
+        if not isinstance(usernames, list) or not all(isinstance(u, str) for u in usernames):
+            return {"ok": False, "msg": "好友选择无效"}
+        usernames = [u.strip() for u in usernames if str(u).strip()]
+        if not usernames:
+            return {"ok": False, "msg": "请至少选择一位好友"}
+        contacts = _MOMENTS.get("contacts") or []
+        with _LABEL_LOCK:
+            store = wechat_labels.load_store(_labels_path())
+            record = _find_label(store, label_id)
+            if record is None:
+                return {"ok": False, "msg": "标签不存在"}
+            name = str(payload.get("name") or "").strip()
+            if name:
+                record["name"] = name
+            count = wechat_labels.save_local_members(record, usernames, contacts)
+            store["accounts"][_current_account()]["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            wechat_labels.save_store(_labels_path(), store)
+        return {"ok": True, "count": count}
+    except Exception as exc:
+        return {"ok": False, "msg": str(exc)}
+
+
+@app.post("/api/moments/labels/delete")
+async def api_moments_labels_delete(payload: dict):
+    try:
+        if not _current_account():
+            return {"ok": False, "msg": "请先点击「刷新」"}
+        label_id = wechat_labels.label_id_from_group(payload.get("id"))
+        if not label_id:
+            return {"ok": False, "msg": "缺少标签 ID"}
+        with _LABEL_LOCK:
+            store = wechat_labels.load_store(_labels_path())
+            account = _current_account()
+            before = len(wechat_labels.label_records(store, account))
+            wechat_labels.account_record(store, account)["labels"] = [
+                item for item in wechat_labels.label_records(store, account)
+                if str(item.get("id")) != str(label_id)]
+            after = len(wechat_labels.label_records(store, account))
+            if after == before:
+                return {"ok": False, "msg": "标签不存在"}
+            wechat_labels.save_store(_labels_path(), store)
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "msg": str(exc)}
+
+
+@app.post("/api/moments/labels/apply")
+async def api_moments_labels_apply(payload: dict):
+    try:
+        if not _current_account():
+            return {"ok": False, "msg": "请先点击「刷新」"}
+        label_id = wechat_labels.label_id_from_group(payload.get("id"))
+        if not label_id:
+            return {"ok": False, "msg": "缺少标签 ID"}
+        mode = "ignore" if str(payload.get("mode") or "").lower() == "ignore" else "sync"
+        with _LABEL_LOCK:
+            store = wechat_labels.load_store(_labels_path())
+            record = _find_label(store, label_id)
+            if record is None:
+                return {"ok": False, "msg": "标签不存在"}
+            pending = record.get("pending") or {}
+            if not pending.get("added") and not pending.get("removed"):
+                return {"ok": False, "msg": "这个标签在微信里没有新变化"}
+            wechat_labels.apply_pending(record, mode=mode)
+            wechat_labels.save_store(_labels_path(), store)
+        return {"ok": True, "mode": mode}
+    except Exception as exc:
+        return {"ok": False, "msg": str(exc)}
+
+
+@app.post("/api/moments/labels/convert")
+async def api_moments_labels_convert(payload: dict):
+    try:
+        if not _current_account():
+            return {"ok": False, "msg": "请先点击「刷新」"}
+        label_id = wechat_labels.label_id_from_group(payload.get("id"))
+        if not label_id:
+            return {"ok": False, "msg": "缺少标签 ID"}
+        with _LABEL_LOCK:
+            store = wechat_labels.load_store(_labels_path())
+            record = _find_label(store, label_id)
+            if record is None:
+                return {"ok": False, "msg": "标签不存在"}
+            name = str(record.get("name") or "标签").strip() or "标签"
+            usernames = [str(m.get("wxid") or "") for m in record.get("members") or []
+                         if str(m.get("wxid") or "").strip()]
+            account = _current_account()
+            wechat_labels.account_record(store, account)["labels"] = [
+                item for item in wechat_labels.label_records(store, account)
+                if str(item.get("id")) != str(label_id)]
+            wechat_labels.save_store(_labels_path(), store)
+        if not usernames:
+            return {"ok": False, "msg": "这个标签没有成员，已从列表移除"}
+        return _save_group_payload({"name": name, "usernames": usernames})
     except Exception as exc:
         return {"ok": False, "msg": str(exc)}
 
 
 @app.post("/api/moments/groups/save")
 async def api_moments_groups_save(payload: dict):
-    """新建或更新一个分组（带 id 即更新）。"""
+    return _save_group_payload(payload)
+
+
+def _save_group_payload(payload: dict) -> dict:
     try:
         if not _current_account():
             return {"ok": False, "msg": "请先点击「刷新」"}
@@ -749,11 +1156,9 @@ async def api_moments_groups_save(payload: dict):
                     "msg": f"已有分组「{clash.get('name')}」用同一个导出文件夹「{folder}」，请换个名字"}
         target["folder"] = folder
         target["keep_interactions"] = bool(payload.get("keep_interactions"))
-        # 默认「组合」：整组一份；勾选「拆分」才每位好友一个子文件夹。
         split = payload.get("split")
         target["split"] = False if split is None else bool(split)
         target["members"] = [{"wxid": u, "name": names.get(u) or u} for u in usernames]
-        # 保存/编辑即视为已读：记录当前条数快照，之后新增的朋友圈才会提示「新 N 条」。
         target["last_seen_posts"] = _group_total_posts(target)
         _save_group_records(records)
         return {"ok": True, "group": _group_view(target)}
@@ -763,7 +1168,6 @@ async def api_moments_groups_save(payload: dict):
 
 @app.post("/api/moments/groups/seen")
 async def api_moments_groups_seen(payload: dict):
-    """把分组标记为已读：记录当前条数快照，之后的新朋友圈重新计为「新」。"""
     try:
         gid = str(payload.get("id") or "").strip()
         if not gid:
@@ -783,7 +1187,6 @@ async def api_moments_groups_seen(payload: dict):
 
 @app.post("/api/moments/groups/delete")
 async def api_moments_groups_delete(payload: dict):
-    """删除分组记录；磁盘上已导出的文件夹保留。"""
     try:
         gid = str(payload.get("id") or "").strip()
         records = _group_records()
@@ -811,7 +1214,6 @@ CONTACT_COLUMNS: dict[str, str] = {
 
 @app.post("/api/contacts/all")
 async def api_contacts_all(payload: dict):
-    """全部当前好友的详细信息（"好友列表导出"页签）。"""
     try:
         account_dir = _moments_ready()
         details = await run_in_threadpool(wxmoments.load_contact_details, account_dir)
@@ -823,7 +1225,6 @@ async def api_contacts_all(payload: dict):
 
 @app.post("/api/contacts/export")
 async def api_contacts_export(payload: dict):
-    """按所选列导出全部好友为 CSV（UTF-8 BOM，Excel 可直接打开）。"""
     try:
         account_dir = _moments_ready()
         requested = payload.get("columns") or []
@@ -975,7 +1376,6 @@ def _run_moments(job: Job, account_info: wxmoments.AccountInfo,
                  account_dir: Path, start, end, usernames,
                  keep_interactions: bool,
                  posts_override: list[dict[str, Any]] | None = None) -> None:
-    """朋友圈导出后台任务：图片密钥 → 逐条导出（进度）→ 生成 PDF。"""
     try:
         config = _moments_config()
         output_root = _output_root()
@@ -1048,7 +1448,6 @@ def _run_moments(job: Job, account_info: wxmoments.AccountInfo,
 
 def _unique_member_dir(group_dir: Path, display: str, wxid: str,
                        used: dict[str, str]) -> Path:
-    """组内每位好友一个子目录；重名时追加编号，避免互相覆盖。"""
     base = wxmoments.sanitize_folder_name(display or wxid, fallback=wxid or "好友")
     name = base
     index = 2
@@ -1064,7 +1463,6 @@ def _export_group_dir(job: Job, account_info: wxmoments.AccountInfo, account_dir
                       posts: list[dict[str, Any]], usernames: list[str],
                       keep_interactions: bool, label: str,
                       base_done: int, grand_total: int) -> dict[str, Any]:
-    """把 posts 导出到 out_dir（md/html/pdf/下载报告），就地复用已有图片。"""
     from wechat_decrypt_tool.modules.sns_media import (
         reset_sns_download_report, sns_download_report,
     )
@@ -1106,7 +1504,6 @@ def _export_group_dir(job: Job, account_info: wxmoments.AccountInfo, account_dir
 def _run_moments_group(job: Job, account_info: wxmoments.AccountInfo,
                        account_dir: Path, group: dict[str, Any],
                        folder: str) -> None:
-    """分组导出到 output/<组名>/：拆分＝每位好友一个子文件夹，组合＝整组一份。"""
     try:
         config = _moments_config()
         group_dir = _output_root() / folder
@@ -1121,6 +1518,10 @@ def _run_moments_group(job: Job, account_info: wxmoments.AccountInfo,
         contact_names = _contact_names()
         keep_interactions = bool(group.get("keep_interactions"))
         split = bool(group.get("split", False))
+        is_label = wechat_labels.is_label_group_id(group.get("id"))
+        if is_label:
+            job.add_log(f"微信标签「{group.get('name')}」：导出 {len(group.get('members') or [])} 位已匹配好友"
+                        + ("（成员未完整读取，未匹配的好友不会出现）" if not group.get("complete") else ""))
 
         plans: list[tuple[str, str, list[dict[str, Any]]]] = []
         for member in group.get("members") or []:
@@ -1162,6 +1563,9 @@ def _run_moments_group(job: Job, account_info: wxmoments.AccountInfo,
         (group_dir / "group.json").write_text(json.dumps({
             "name": str(group.get("name") or ""),
             "folder": folder,
+            "source": str(group.get("source") or "custom"),
+            "label_status": str(group.get("status") or ""),
+            "label_complete": bool(group.get("complete")) if is_label else None,
             "split": split,
             "keep_interactions": keep_interactions,
             "exported_at": exported_at,
@@ -1170,7 +1574,10 @@ def _run_moments_group(job: Job, account_info: wxmoments.AccountInfo,
                 for wxid, display, posts in plans
             ],
         }, ensure_ascii=False, indent=2), encoding="utf-8")
-        _touch_group_export(str(group.get("id") or ""))
+        if is_label:
+            _mark_label_export(str(group.get("label_id") or ""), total)
+        else:
+            _touch_group_export(str(group.get("id") or ""))
 
         job.results.append({
             "dir": str(group_dir),
@@ -1186,7 +1593,6 @@ def _run_moments_group(job: Job, account_info: wxmoments.AccountInfo,
 
 
 def _clear_stale_proxy() -> None:
-    """启动时清理上次崩溃残留的系统代理（历史抓包方案遗留的兜底，防止用户莫名断网）。"""
     if sys.platform != "win32":
         return
     import winreg

@@ -1,4 +1,3 @@
-"""Shared read-only access to WeChat browser cache files."""
 from __future__ import annotations
 
 import os
@@ -44,11 +43,6 @@ def find_profiles() -> list[str]:
 
 
 def _snapshot(path: str) -> str:
-    """先复制一份再读。
-
-    微信正开着的时候会持有这几个 SQLite 文件的锁，直接连上去会 ``database is locked``
-    （而且 sqlite 会先卡住重试几秒），所以一律读副本。
-    """
     try:
         fd, tmp = tempfile.mkstemp(prefix="wxmoments-cache-", suffix=".db")
         os.close(fd)
@@ -62,10 +56,6 @@ def _snapshot(path: str) -> str:
 
 
 def _sqlite_rows(path: str) -> list[tuple[str, int, str]]:
-    """读出 (来源名, 新鲜度, url)。读不了就返回空列表。
-
-    这些表是 WITHOUT ROWID 的，主键列就是 ``id``，所以新鲜度取 ``id``。
-    """
     src = _snapshot(path)
     if not src:
         return []
@@ -100,7 +90,6 @@ def _sqlite_rows(path: str) -> list[tuple[str, int, str]]:
 
 
 def _text_urls(path: str) -> list[tuple[str, int, str]]:
-    """非数据库文件（比如 .wxbak）里的 URL，按字节位置当新鲜度。"""
     src = _snapshot(path)
     if not src:
         return []
@@ -119,7 +108,6 @@ def _text_urls(path: str) -> list[tuple[str, int, str]]:
 
 
 def iter_cached_urls():
-    """Yield cache URLs through one snapshot path shared by harvest and fetch."""
     for profile in find_profiles():
         for name in DATA_FILES:
             path = os.path.join(profile, name)

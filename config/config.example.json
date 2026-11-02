@@ -4,5 +4,6 @@
   "account": "",
   "self_username": "",
   "self_display_name": "",
-  "output_root": ""
+  "output_root": "",
+  "wechat_label_uia": true
 }

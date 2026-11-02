@@ -89,7 +89,6 @@ def sns_download_report() -> dict[str, Any]:
 
 
 def _classify_failure(exc: BaseException) -> tuple[str, int]:
-    """Map an exception to a (report category, http status) pair."""
     if isinstance(exc, SnsMediaError):
         return "rejected", 0
     if isinstance(exc, httpx.HTTPStatusError):
@@ -115,12 +114,6 @@ def _describe_response(resp: httpx.Response) -> str:
 
 
 async def _download_with_retries(attempt_fn, *, url: str):
-    """Run an async download attempt, retrying only transient failures.
-
-    Deterministic 4xx responses are surfaced immediately: the caller's fallback
-    (thumbnail rendition, alternative host) is the thing that can actually
-    rescue those, and re-requesting the same URL would just waste the budget.
-    """
     last_exc: Optional[BaseException] = None
     for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
         try:

@@ -288,74 +288,50 @@ def _decrypt_page(enc_key: bytes, page: bytes, page_num: int) -> bytes:
 
 def _parse_sqlcipher_wal_frames(
     enc_key: bytes, wal_path: str | Path
-) -> tuple[list | None, int]:
-    """Parse an SQLCipher WAL file and decrypt every frame's page payload.
-
-    SQLCipher WAL frames keep a 24-byte plaintext frame header (page number,
-    commit database-size, salt-1, salt-2, checksum-1, checksum-2) followed by an
-    encrypted page of ``PAGE_SIZE`` bytes. The page is encrypted with the same key
-    derived for the main database, so ``_decrypt_page`` can be reused directly.
-
-    Returns ``(epoch_groups, frame_count)`` where ``epoch_groups`` is an ordered
-    list of ``[salt, [(pgno, dbsize, decrypted_page), ...]]`` grouped by the frame
-    salt, or ``(None, 0)`` if the path is missing / not a usable WAL.
-    """
+) -> tuple[list[tuple[int, int, bytes]], int, tuple[int, int]]:
+    empty: tuple[list[tuple[int, int, bytes]], int, tuple[int, int]] = ([], 0, (0, 0))
     wal_path = Path(wal_path)
     try:
         if not wal_path.exists() or not wal_path.is_file():
-            return None, 0
+            return empty
         wal = wal_path.read_bytes()
     except Exception:
-        return None, 0
+        return empty
 
     if len(wal) < WAL_HEADER_SIZE:
-        return None, 0
+        return empty
     try:
         magic = struct.unpack(">I", wal[:4])[0]
+        header_salt = struct.unpack(">II", wal[16:24])
     except Exception:
-        return None, 0
+        return empty
     if magic not in (WAL_MAGIC_BE, WAL_MAGIC_LE):
-        return None, 0
+        return empty
 
-    epochs: list[list] = []
-    salt_index: dict[tuple[int, int], int] = {}
+    frames: list[tuple[int, int, bytes]] = []
     off = WAL_HEADER_SIZE
-    frame_count = 0
     while off + WAL_FRAME_HEADER_SIZE + PAGE_SIZE <= len(wal):
         try:
-            pgno, dbsize = struct.unpack(">II", wal[off : off + 8])
-            s1, s2 = struct.unpack(">II", wal[off + 8 : off + 16])
+            pgno, dbsize = struct.unpack(">II", wal[off: off + 8])
+            s1, s2 = struct.unpack(">II", wal[off + 8: off + 16])
         except Exception:
             break
-        salt = (s1, s2)
+        if (s1, s2) != header_salt:
+            break
         if pgno <= 0 or pgno > 1_000_000:
-            off += WAL_FRAME_HEADER_SIZE + PAGE_SIZE
-            continue
-
-        frame_data = wal[off + WAL_FRAME_HEADER_SIZE : off + WAL_FRAME_HEADER_SIZE + PAGE_SIZE]
+            break
+        frame_data = wal[off + WAL_FRAME_HEADER_SIZE: off + WAL_FRAME_HEADER_SIZE + PAGE_SIZE]
         try:
             page = _decrypt_page(enc_key, frame_data, pgno)
         except Exception:
             page = b"\x00" * PAGE_SIZE
-
-        idx = salt_index.get(salt)
-        if idx is None:
-            idx = len(epochs)
-            salt_index[salt] = idx
-            epochs.append([salt, []])
-        epochs[idx][1].append((pgno, dbsize, page))
-        frame_count += 1
+        frames.append((pgno, dbsize, page))
         off += WAL_FRAME_HEADER_SIZE + PAGE_SIZE
 
-    return epochs, frame_count
+    return frames, len(frames), header_salt
 
 
 def _run_sqlite_quick_check(data: bytes) -> tuple[bool, str]:
-    """Run ``PRAGMA quick_check`` over an in-memory decrypted database buffer.
-
-    Returns ``(ok, message)``. Used to validate a WAL-merged database before
-    trusting it; on failure the caller falls back to the plain main-file output.
-    """
     tmp_path: str | None = None
     try:
         fd, tmp_path = tempfile.mkstemp(suffix=".db")
@@ -386,22 +362,6 @@ def _merge_sqlcipher_wal_into_decrypted(
     wal_path: str | Path,
     decrypted_main: bytes,
 ) -> tuple[bytes | None, dict[str, Any]]:
-    """Merge the current-epoch WAL frames into the decrypted main database pages.
-
-    When WeChat is running, newly written rows (e.g. fresh Moments posts) may only
-    exist inside the ``-wal`` file that has not been checkpointed back into the
-    main database. The main-file-only decrypt therefore silently drops them.
-
-    A WAL can accumulate several salt epochs across checkpoints; only frames of
-    the *current* epoch (those whose commit ``dbsize`` equals the largest seen
-    across the whole WAL) describe the live state. Older epochs describe already
-    checkpointed snapshots and must be skipped — applying them corrupts the merge.
-
-    Returns ``(merged_data, meta)``. ``merged_data`` is ``None`` when no usable
-    WAL exists; otherwise the caller must still validate it with
-    ``_run_sqlite_quick_check`` before writing (fall back to the main-only output
-    on failure).
-    """
     meta: dict[str, Any] = {
         "wal": False,
         "frames": 0,
@@ -410,58 +370,56 @@ def _merge_sqlcipher_wal_into_decrypted(
         "max_dbsize": 0,
         "merged_pages": 0,
         "target_pages": 0,
+        "reason": "",
     }
 
-    epochs, frame_count = _parse_sqlcipher_wal_frames(enc_key, wal_path)
-    if not epochs:
+    frames, frame_count, header_salt = _parse_sqlcipher_wal_frames(enc_key, wal_path)
+    if frame_count <= 0:
+        meta["reason"] = "no_frame"
         return None, meta
     meta["wal"] = True
     meta["frames"] = frame_count
-    meta["epochs"] = len(epochs)
+    meta["epochs"] = 1
+    meta["selected_epochs"] = ["%08x_%08x" % (int(header_salt[0]), int(header_salt[1]))]
 
-    global_max = 0
-    for _salt, frames in epochs:
-        for _pgno, dbsize, _page in frames:
-            if dbsize and int(dbsize) > global_max:
-                global_max = int(dbsize)
-    if global_max <= 0:
+    commit_index = -1
+    target_pages = 0
+    for index, (_pgno, dbsize, _page) in enumerate(frames):
+        if int(dbsize) > 0:
+            commit_index = index
+            target_pages = int(dbsize)
+    if commit_index < 0:
+        meta["reason"] = "no_commit"
         return None, meta
-    meta["max_dbsize"] = global_max
-
-    
-    selected = [
-        (salt, frames) for salt, frames in epochs
-        if any(int(dbsize) == global_max for _pgno, dbsize, _page in frames)
-    ]
-    meta["selected_epochs"] = [
-        "%08x_%08x" % (int(salt[0]), int(salt[1])) for salt, _frames in selected
-    ]
+    meta["max_dbsize"] = target_pages
 
     n_main = len(decrypted_main) // PAGE_SIZE
     pages: dict[int, bytes] = {}
     for i in range(1, n_main + 1):
         start = (i - 1) * PAGE_SIZE
-        pages[i] = bytes(decrypted_main[start : start + PAGE_SIZE])
+        pages[i] = bytes(decrypted_main[start: start + PAGE_SIZE])
 
-    maxp = n_main
     merged_count = 0
-    for _salt, frames in selected:
-        for pgno, _dbsize, page in frames:
-            pages[pgno] = page
-            if pgno > maxp:
-                maxp = pgno
-            merged_count += 1
-    maxp = max(maxp, global_max)
+    highest = n_main
+    for pgno, _dbsize, page in frames[: commit_index + 1]:
+        pages[int(pgno)] = page
+        if int(pgno) > highest:
+            highest = int(pgno)
+        merged_count += 1
+
+    final_pages = max(highest, target_pages)
     meta["merged_pages"] = merged_count
-    meta["target_pages"] = maxp
+    meta["target_pages"] = final_pages
 
     out = bytearray()
-    for i in range(1, maxp + 1):
+    for i in range(1, final_pages + 1):
         out += pages.get(i, b"\x00" * PAGE_SIZE)
 
-    
-    out[28:32] = struct.pack(">I", maxp)
-    out[36:40] = struct.pack(">I", 0)
+    if struct.unpack(">I", out[28:32])[0] != final_pages:
+        counter = (struct.unpack(">I", out[24:28])[0] + 1) & 0xFFFFFFFF
+        out[24:28] = struct.pack(">I", counter)
+        out[28:32] = struct.pack(">I", final_pages)
+        out[92:96] = struct.pack(">I", counter)
     return bytes(out), meta
 
 

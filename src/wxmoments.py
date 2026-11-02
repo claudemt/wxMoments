@@ -91,14 +91,12 @@ _ILLEGAL_FOLDER_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 
 def sanitize_folder_name(value: str, fallback: str = "分组") -> str:
-    """把分组名转成 Windows 可用的目录名（非法字符、结尾的点与空格一律去掉）。"""
     name = _ILLEGAL_FOLDER_CHARS.sub("_", str(value or "").strip())
     name = name.rstrip(" .")
     return name or fallback
 
 
 def load_groups(path: Path) -> dict[str, Any]:
-    """读取分组存储，文件缺失或损坏时返回空结构，不抛错。"""
     if not path.exists():
         return {"version": GROUPS_VERSION, "groups": []}
     try:
@@ -113,7 +111,6 @@ def load_groups(path: Path) -> dict[str, Any]:
 
 
 def save_groups(path: Path, data: dict[str, Any]) -> None:
-    """原子写入分组存储，避免中途失败留下半个文件。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, ensure_ascii=False, indent=2)
     tmp = path.with_name(path.name + ".tmp")
@@ -413,10 +410,10 @@ async def save_image_keys(account: str, wxid_dir: Path, db_storage_dir: Path) ->
     )
 
 
-def decrypt_databases(account_info: AccountInfo, key: str) -> Path:
+def _decrypt_selected(account_info: AccountInfo, key: str, required: set[str],
+                      failure_hint: str, not_found_hint: str) -> tuple[Path, str]:
     from wechat_decrypt_tool.modules.wechat_decrypt import decrypt_wechat_databases
 
-    required = {"sns.db", "contact.db"}
     result = decrypt_wechat_databases(
         db_storage_path=str(account_info.db_storage_dir), key=key, database_names=required)
     if str(result.get("status") or "").lower() not in {"success", "ok"}:
@@ -430,25 +427,43 @@ def decrypt_databases(account_info: AccountInfo, key: str) -> Path:
             os.path.normcase(str(Path(source).resolve()))
             == os.path.normcase(str(account_info.db_storage_dir.resolve()))
         ) if source else account_info.account.casefold() == str(account_name or "").casefold()
-        if same_account:
-            out = Path(str(detail.get("output_dir") or ""))
-            # Require outputs from this attempt, not stale files from an earlier run.
-            processed = {Path(path).name.casefold() for path in detail.get("processed_files") or []}
-            missing = required - processed
-            if missing or not all((out / name).is_file() for name in required):
-                raise RuntimeError("联系人或朋友圈数据读取失败，请确认微信已登录后点击「刷新」。")
-            db_diagnostics = detail.get("db_diagnostics") or {}
-            fallback_labels = []
-            for name, label in (("contact.db", "联系人"), ("sns.db", "朋友圈")):
-                wal = (db_diagnostics.get(name) or {}).get("wal_merge") or {}
-                if wal.get("quick_check_ok") is False and not wal.get("applied"):
-                    fallback_labels.append(label)
-            if fallback_labels:
-                notice = (f"{'、'.join(fallback_labels)}的最新改动暂时无法读取，已使用通过校验的本地数据。"
-                          "最近的新增或修改可能未包含；请稍后点击「刷新」。")
-                logger.warning(notice)
-            return out
-    raise RuntimeError("没有读取到当前微信账号的联系人和朋友圈数据，请点击「刷新」。")
+        if not same_account:
+            continue
+        out = Path(str(detail.get("output_dir") or ""))
+        processed = {Path(path).name.casefold() for path in detail.get("processed_files") or []}
+        missing = required - processed
+        if missing or not all((out / name).is_file() for name in required):
+            raise RuntimeError(failure_hint)
+        db_diagnostics = detail.get("db_diagnostics") or {}
+        fallback_labels = []
+        for name, label in (("contact.db", "联系人"), ("sns.db", "朋友圈")):
+            if name not in required:
+                continue
+            wal = (db_diagnostics.get(name) or {}).get("wal_merge") or {}
+            if not wal.get("attempted") or wal.get("applied"):
+                continue
+            if str(wal.get("reason") or "") == "no_frame":
+                continue
+            fallback_labels.append(label)
+        stale = f"{'、'.join(fallback_labels)}的最新改动未读取" if fallback_labels else ""
+        if stale:
+            logger.warning("%s，已用本地数据。", stale)
+        return out, stale
+    raise RuntimeError(not_found_hint)
+
+
+def decrypt_databases(account_info: AccountInfo, key: str) -> tuple[Path, str]:
+    return _decrypt_selected(
+        account_info, key, {"sns.db", "contact.db"},
+        "联系人或朋友圈数据读取失败，请确认微信已登录后点击「刷新」。",
+        "没有读取到当前微信账号的联系人和朋友圈数据，请点击「刷新」。")
+
+
+def decrypt_contact_db(account_info: AccountInfo, key: str) -> tuple[Path, str]:
+    return _decrypt_selected(
+        account_info, key, {"contact.db"},
+        "读取微信通讯录失败，请确认微信已登录后重试。",
+        "没有读取到当前微信账号的通讯录，请点击「刷新」后重试。")
 
 
 def image_size(payload: bytes, media_type: str) -> tuple[int, int]:
@@ -492,7 +507,6 @@ def timestamp_folder_name(created: datetime) -> str:
 
 
 def _find_existing_image(post_dir: Path, index: int) -> Path | None:
-    """分组下载时用：找 post_dir 下已存在且非空的第 index 张图（扩展名不限）。"""
     if not post_dir.is_dir():
         return None
     for candidate in sorted(post_dir.glob(f"{index:02d}.*")):
@@ -654,7 +668,6 @@ def load_timeline(account_dir: Path, usernames: list[str] | None = None, *, sour
             break
         offset += len(page)
 
-    # 微信实时读取可能返回同一 tid 的多行（原始库重复/分页重叠），按 tid 去重。
     seen: set[str] = set()
     deduped: list[dict[str, Any]] = []
     for item in posts:
@@ -784,16 +797,6 @@ _SELF_SUFFIX_RE = re.compile(r"^(wxid_[^_]+)_[0-9a-zA-Z]{1,8}$")
 
 
 def self_username_variants(value: str) -> list[str]:
-    """Yield the plausible spellings of a single self-identifier.
-
-    WeChat 4.x stores an account on disk as ``<wxid>_<suffix>`` but records the
-    bare ``<wxid>`` in ``SnsTimeLine.user_name``. ``clean_account_name`` only
-    strips a suffix that happens to be exactly four hex characters, so anything
-    else (different length, non-hex) left the filter comparing against a name
-    that exists nowhere in the database — and the export came out empty with no
-    explanation. Emitting both spellings and letting the equality filter decide
-    costs nothing and removes that whole failure mode.
-    """
     text = str(value or "").strip()
     if not text:
         return []
@@ -896,15 +899,6 @@ def infer_contact_privacy_status(flag: int, local_type: int, delete_flag: int) -
 
 
 def contact_is_current_friend(row: sqlite3.Row, table: str, self_usernames: set[str]) -> bool:
-    """Return whether a contact row represents a current address-book friend.
-
-    WeChat's contact.db is a broad profile cache, not a pure friend list. In
-    recent PC WeChat builds, many non-friend cached profiles appear in
-    contact.local_type=3 with flag=4, which previously made exports balloon
-    into thousands of unrelated-looking rows. Current address-book contacts
-    are the rows in contact.local_type=1 that are not deleted and not official
-    accounts.
-    """
     if str(table or "").lower() != "contact":
         return False
     username = decode_contact_text(row_value(row, "username"))
@@ -1027,12 +1021,6 @@ def load_contact_entries(account_dir: Path) -> list[ContactEntry]:
 
 
 def parse_contact_extra_buffer(blob: Any) -> dict[str, str]:
-    """解析 contact.extra_buffer（protobuf）：签名/国家/省/市。
-
-    微信 PC 4.x 的 extra_buffer 顶层字段：
-      f4=个性签名  f5=国家  f6=省  f7=市（均为 len-delimited UTF-8 字符串）。
-    拍一拍等设置不落库，本地数据库无对应字段。
-    """
     out: dict[str, str] = {}
     if blob is None:
         return out
@@ -1075,12 +1063,6 @@ def parse_contact_extra_buffer(blob: Any) -> dict[str, str]:
 
 
 def load_contact_details(account_dir: Path) -> list[dict[str, Any]]:
-    """读取全部当前好友的详细信息（结构化，用于"好友列表导出"）。
-
-    字段：wxid、微信号(alias)、备注名、备注描述、实际名称(昵称)、
-    个性签名、国家/省/市、头像链接、共同群聊数。
-    隐私状态（黑名单/朋友圈权限）与拍一拍状态在微信本地数据库不落库，无法导出。
-    """
     contact_db = account_dir / "contact.db"
     if not contact_db.exists():
         return []
@@ -1397,7 +1379,6 @@ _DOWNLOAD_FAILURE_HINTS = {
 
 
 def summarize_download_report(report: dict[str, Any]) -> str:
-    """Turn the raw download tally into something a user can act on."""
     counts = report.get("counts") if isinstance(report, dict) else None
     if not isinstance(counts, dict):
         return ""
@@ -1445,12 +1426,6 @@ def describe_empty_export(
     start: datetime | None,
     end: datetime | None,
 ) -> str:
-    """Explain *why* an export produced nothing.
-
-    This used to fail silently: an over-narrow filter wrote an empty moments.md
-    and exited 0, so "没有导出朋友圈" arrived as a bug report with no clue
-    attached. Re-query without the person filter so we can name the culprit.
-    """
     lines = ["没有导出任何朋友圈。"]
 
     try:
@@ -1466,10 +1441,7 @@ def describe_empty_export(
     all_stamps = stamps_of(everything)
     if not all_stamps:
         lines.append(
-            "本地微信数据库里没有任何朋友圈记录。请确认：\n"
-            "  1. 这台电脑的微信已登录，并且在手机上打开过朋友圈（朋友圈要微信自己同步下来，"
-            "不会随聊天记录一起出现）；\n"
-            "  2. 微信文件目录指向正确（可在 config/config.json 的 wechat_data_root 中填写）。"
+            "本地没有朋友圈记录。请确认微信已登录，且已在本机打开过朋友圈。"
         )
         return "\n".join(lines)
 
@@ -1523,11 +1495,6 @@ async def export_markdown(
     coverage_posts: list[dict[str, Any]] | None = None,
     reuse_existing: bool = False,
 ) -> tuple[dict[str, Any], list[ExportedPost]]:
-    """导出为 Markdown。
-
-    reuse_existing=True：按 createTime 使用稳定的帖子目录，并复用目录里已存在的图片文件
-    （不再联网重下）。用于分组「下载」—— 同一好友写到同一个固定文件夹。
-    """
     figure = output / "figure"
     figure.mkdir(parents=True, exist_ok=True)
     if posts_override is not None:

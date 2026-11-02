@@ -1,4 +1,3 @@
-"""One stoppable cache-harvest worker per author; snapshots are thread-safe."""
 from __future__ import annotations
 
 import logging
@@ -81,7 +80,6 @@ class AuthorWatch:
         try:
             with ThreadPoolExecutor(max_workers=5) as pool:
                 while not self.stop_event.is_set():
-                    # A closed browser cannot send stop; release idle workers too.
                     with self.lock:
                         if time.monotonic() - self.last_seen > 90:
                             break

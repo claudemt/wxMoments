@@ -89,7 +89,7 @@ function askConfirm({ title = "确认删除？", message = "", okText = "确认"
   });
 }
 
-function renderPager(container, total, size, page, onPage) {
+function renderPager(container, total, size, page, onPage, unit = "条") {
   container.innerHTML = "";
   const pages = Math.max(1, Math.ceil(total / size));
   const btn = (label, disabled, fn) => {
@@ -101,7 +101,7 @@ function renderPager(container, total, size, page, onPage) {
   };
   btn("‹ 上一页", page <= 0, () => onPage(page - 1));
   const info = document.createElement("span");
-  info.textContent = `第 ${page + 1} / ${pages} 页 · 共 ${total} 条`;
+  info.textContent = `${page + 1} / ${pages} 页 · ${total} ${unit}`;
   container.append(info);
   btn("下一页 ›", page >= pages - 1, () => onPage(page + 1));
 }
@@ -153,8 +153,6 @@ function startTaskTicker() {
   }, 700);
 }
 
-const CREEP_CEILING = 95;
-
 function creepPercent(item) {
   const job = item.snapshot;
   if (job.status === "done") {
@@ -162,12 +160,14 @@ function creepPercent(item) {
     return 100;
   }
   const real = job.total ? Math.min(100, job.done / job.total * 100) : 0;
-  let shown = Math.max(item.shown || 0, real);
-  if (job.status === "running" && shown < CREEP_CEILING) {
-    const step = Math.min(1.5, Math.max(0.15, (CREEP_CEILING - shown) * 0.03));
-    shown = Math.min(CREEP_CEILING, shown + step);
+  const prev = item.shown || 0;
+  if (job.status !== "running") {
+    item.shown = Math.max(prev, real);
+    return item.shown;
   }
-  item.shown = Math.min(shown, 100);
+  // 只在真实进度之上留 2.5% 的平滑余量，不再靠虚涨冲到 95%/99% 造成"卡死"错觉
+  const drift = Math.min(2.5, Math.max(0, 100 - real) * 0.02);
+  item.shown = Math.min(100, Math.max(real, Math.min(prev + 0.6, real + drift)));
   return item.shown;
 }
 
@@ -194,6 +194,15 @@ function renderJob(item) {
     row.className = "dl-row";
     const directory = document.createElement("div");
     directory.className = "dl-dir";
+    const open = document.createElement("button");
+    open.className = "dl-open";
+    open.type = "button";
+    open.textContent = "打开目录";
+    open.onclick = async () => {
+      if (!item.dir) return;
+      const res = await api("/api/reveal", { path: item.dir });
+      if (!res.ok) notify(res.msg || "打开目录失败", "warning");
+    };
     const cancel = document.createElement("button");
     cancel.className = "dl-cancel";
     cancel.textContent = "取消";
@@ -205,7 +214,7 @@ function renderJob(item) {
         else cancel.disabled = false;
       } catch (error) { cancel.disabled = false; }
     };
-    row.append(directory, cancel);
+    row.append(directory, open, cancel);
     const details = document.createElement("details");
     details.className = "task-details";
     const summary = document.createElement("summary");
@@ -213,7 +222,7 @@ function renderJob(item) {
     const log = document.createElement("pre");
     details.append(summary, log);
     popup.body.append(progress, message, row, details);
-    item.view = { bar, message, directory, cancel, log };
+    item.view = { bar, message, directory, open, cancel, log };
   }
   const view = item.view;
   view.bar.style.width = `${job.status === "done" ? 100 : pct}%`;
@@ -221,9 +230,11 @@ function renderJob(item) {
   view.directory.textContent = item.dir ? `保存目录：${item.dir}` : "";
   view.log.textContent = (job.log || []).join("\n") || "暂无日志";
   show(view.cancel, job.status === "running" && item.kind !== "init");
+  show(view.open, job.status === "done" && !!item.dir);
   if (item.completed && !item.closing) {
     item.closing = true;
-    floating.finish(popup, job.status === "error" ? 6000 : 4000);
+    // 完成态留足时间让用户点「打开目录」；鼠标悬停时本就会暂停自动关闭
+    floating.finish(popup, job.status === "error" ? 8000 : item.dir ? 12000 : 4000);
   }
 }
 
@@ -301,39 +312,84 @@ $("logs-open").onclick = async () => {
 
 const cState = {
   loaded: false,
-  contacts: [],
-  columns: ["remark", "nickname", "wechat_id", "region", "signature"],
+  kind: "contacts",
+  data: { contacts: [], groups: [] },
+  columnDefs: {
+    contacts: {
+      remark: "备注名",
+      nickname: "实际名称",
+      wechat_id: "微信号",
+      region: "地区",
+      signature: "个性签名",
+      description: "备注",
+      wxid: "用户ID",
+      common_groups: "共同群数",
+      pinned: "置顶",
+      muted: "免打扰",
+      avatar: "头像链接",
+    },
+    groups: {
+      name: "群名称",
+      remark: "备注名",
+      pinned: "置顶",
+      folded: "折叠",
+      owner: "群主",
+      member_count: "成员数",
+      members: "群成员",
+      announcement: "群公告",
+      muted: "免打扰",
+      in_room: "在群内",
+      room_id: "群ID",
+      avatar: "群头像",
+    },
+  },
+  columns: {
+    contacts: ["remark", "nickname", "wechat_id", "region", "signature"],
+    groups: ["name", "owner", "member_count", "members", "announcement", "pinned", "folded"],
+  },
   page: 0,
   pageSize: 100,
 };
 
+const CHATLIST_SCOPES = [
+  ["contacts", "好友"],
+  ["groups", "群聊"],
+];
 
-let CONTACT_COLS = {
-  remark: "备注名",
-  nickname: "实际名称",
-  wechat_id: "微信号",
-  region: "地区",
-  signature: "个性签名",
-  description: "备注",
-  wxid: "用户ID",
-  common_groups: "共同群数",
-  avatar: "头像链接",
-};
+const cCollator = new Intl.Collator("zh-Hans-CN", { sensitivity: "base", numeric: true });
+
+function chatListLabel(item, kind) {
+  if (kind === "groups") return item.remark || item.name || item.room_id || "";
+  return item.remark || item.nickname || item.wxid || "";
+}
+
+function sortChatList(list, kind) {
+  const label = (item) => chatListLabel(item, kind);
+  const pinned = list.filter((item) => item.pinned)
+    .sort((a, b) => cCollator.compare(label(a), label(b)));
+  const rest = list.filter((item) => !item.pinned)
+    .sort((a, b) => cCollator.compare(label(a), label(b)));
+  return pinned.concat(rest);
+}
 
 function switchTab(which) {
   show($("panel-moments"), which === "moments");
   show($("panel-wechat"), which === "wechat");
   show($("panel-contacts"), which === "contacts");
+  show($("panel-chat"), which === "chat");
   $("tab-moments").classList.toggle("active", which === "moments");
   $("tab-wechat").classList.toggle("active", which === "wechat");
   $("tab-contacts").classList.toggle("active", which === "contacts");
+  $("tab-chat").classList.toggle("active", which === "chat");
   if (which !== "wechat") stopWatch();
   else if (state.article && !$("author").hidden) startWatch();
-  if (which === "contacts" && !cState.loaded && mState.inited) loadContactsAll();
+  if (which === "contacts" && !cState.loaded) loadChatList();
+  if (which === "chat") window.chatView?.enter();
 }
 $("tab-moments").onclick = () => switchTab("moments");
 $("tab-wechat").onclick = () => switchTab("wechat");
 $("tab-contacts").onclick = () => switchTab("contacts");
+$("tab-chat").onclick = () => switchTab("chat");
 
 const mState = {
   inited: false,
@@ -369,7 +425,7 @@ async function restoreMoments() {
   show($("m-body"), true);
   await loadContacts();
   await refreshTimeline();
-  loadContactsAll();
+  loadChatList();
   await loadGroups();
   followLabelJob(res.label_job);
 }
@@ -405,7 +461,7 @@ async function finishInit(job) {
   show($("m-body"));
   await loadContacts();
   await refreshTimeline();
-  await loadContactsAll();
+  await loadChatList();
   await loadGroups();
   const status = await api("/api/moments/status", undefined, true).catch(() => null);
   if (status && status.label_job) followLabelJob(status.label_job);
@@ -480,9 +536,10 @@ function updateFriendCount() {
   const dates = [];
   if ($("m-start").value) dates.push($("m-start").value.slice(5).replace("-", "/"));
   if ($("m-end").value) dates.push($("m-end").value.slice(5).replace("-", "/"));
-  const people = all ? "全部好友" : `${mState.picked.size} 人`;
-  $("m-filter-state").textContent =
-    (dates.length ? ` ${dates.join(" ~ ")}` : " 全部时间") + ` · ${people}`;
+  const parts = [];
+  if (dates.length) parts.push(dates.join("~"));
+  if (!all) parts.push(`${mState.picked.size} 人`);
+  $("m-filter-state").textContent = parts.length ? ` ${parts.join(" · ")}` : "";
 }
 
 let refreshTimer = null;
@@ -1099,14 +1156,13 @@ function renderTimeline() {
     row.append(t, d, c, m);
     list.append(row);
   });
-  $("m-status").textContent = `共计 ${mState.posts.length} 条`;
+  $("m-status").textContent = mState.posts.length ? `${mState.posts.length} 条` : "";
   if (!mState.posts.length) {
-    $("m-list-count").textContent = mState.picked.size === 0
-      ? "未选择任何好友"
-      : "该筛选条件下没有朋友圈";
-  } else {
-    $("m-list-count").textContent =
-      `共 ${mState.posts.length} 条`;
+    const empty = document.createElement("div");
+    empty.className = "hint muted";
+    empty.textContent = mState.picked.size === 0
+      ? "未选择任何好友" : "该筛选条件下没有朋友圈";
+    list.append(empty);
   }
   renderPager($("m-pager"), mState.posts.length, size, mState.page,
     (p) => { mState.page = p; renderTimeline(); });
@@ -1161,6 +1217,7 @@ $("pd-overlay").addEventListener("click", (e) => {
 function updateExportBtn() {
   const n = mState.selected.size;
   $("m-export").disabled = n === 0;
+  $("m-list-count").textContent = n ? `已选 ${n}` : "";
   const all = $("m-select-all");
   if (all) all.textContent = (mState.posts.length && n === mState.posts.length) ? "取消全选" : "全选";
 }
@@ -1273,72 +1330,113 @@ $("m-export").onclick = async () => {
 
 $("c-init").onclick = initMoments;
 
-async function loadContactsAll() {
+async function loadChatList() {
   let res;
   try {
-    res = await api("/api/contacts/all", {});
+    res = await api("/api/chatlist/all", {});
   } catch (e) {
     return;
   }
   if (!res.ok) {
+    notify(res.msg || "读取失败", "warning");
     return;
   }
   cState.loaded = true;
-  cState.contacts = sortContactsByPinyin(res.contacts || []);
-  CONTACT_COLS = res.columns || CONTACT_COLS;
+  cState.data.contacts = sortChatList(res.contacts || [], "contacts");
+  cState.data.groups = sortChatList(res.groups || [], "groups");
+  if (res.contact_columns) cState.columnDefs.contacts = res.contact_columns;
+  if (res.group_columns) cState.columnDefs.groups = res.group_columns;
   show($("c-body"), true);
-  $("c-export").disabled = cState.columns.length === 0;
-  renderCols();
-  renderContactTable();
+  renderChatList();
 }
 
-function renderCols() {
+function chatListItems() {
+  const list = cState.data[cState.kind] || [];
+  const kw = $("c-search").value.trim().toLowerCase();
+  if (!kw) return list;
+  if (cState.kind === "groups") {
+    return list.filter((g) =>
+      `${g.name}${g.remark}${g.owner}${(g.members || []).join("")}${g.room_id}`
+        .toLowerCase().includes(kw));
+  }
+  return list.filter((c) =>
+    `${c.remark}${c.nickname}${c.wechat_id}${c.wxid}`.toLowerCase().includes(kw));
+}
+
+function chatListCell(item, col) {
+  if (col === "region") {
+    const country = /^(CN|China)$/i.test(item.country || "") ? "" : item.country;
+    return [country, item.province, item.city].filter(Boolean).join(" ");
+  }
+  if (col === "members") return (item.members || []).join("、");
+  if (col === "remark") {
+    if (item.remark) return item.remark;
+    return cState.kind === "groups" ? "" : (item.nickname || item.wxid || "");
+  }
+  if (col === "in_room") return item.in_room ? "是" : "否";
+  if (typeof item[col] === "boolean") return item[col] ? "是" : "";
+  return item[col] ?? "";
+}
+
+function updateChatColsCount() {
+  const kind = cState.kind;
+  $("c-cols-n").textContent =
+    `${cState.columns[kind].length}/${Object.keys(cState.columnDefs[kind]).length}`;
+}
+
+function renderChatCols() {
   const box = $("c-cols");
+  const kind = cState.kind;
+  const defs = cState.columnDefs[kind];
   box.innerHTML = "";
-  for (const [key, label] of Object.entries(CONTACT_COLS)) {
+  for (const [key, label] of Object.entries(defs)) {
     const lab = document.createElement("label");
     const cb = document.createElement("input");
     cb.type = "checkbox";
-    cb.checked = cState.columns.includes(key);
+    cb.checked = cState.columns[kind].includes(key);
     cb.dataset.key = key;
     cb.onchange = () => {
-      if (cb.checked) cState.columns.push(key);
-      else cState.columns = cState.columns.filter((k) => k !== key);
-      $("c-export").disabled = cState.columns.length === 0;
-      renderContactTable();
+      const cols = cState.columns[kind];
+      if (cb.checked) cols.push(key);
+      else cState.columns[kind] = cols.filter((k) => k !== key);
+      $("c-export").disabled = cState.columns[kind].length === 0;
+      updateChatColsCount();
+      renderChatListTable();
     };
     lab.append(cb, document.createTextNode(label));
     box.append(lab);
   }
+  updateChatColsCount();
 }
 
-function filteredContacts() {
-  const kw = $("c-search").value.trim().toLowerCase();
-  if (!kw) return cState.contacts;
-  return cState.contacts.filter((c) =>
-    `${c.remark}${c.nickname}${c.wechat_id}${c.wxid}`.toLowerCase().includes(kw));
+document.addEventListener("click", (e) => {
+  const wrap = $("c-cols-wrap");
+  if (wrap && wrap.open && !wrap.contains(e.target)) wrap.open = false;
+});
+
+function chatListCols() {
+  const kind = cState.kind;
+  const picked = cState.columns[kind];
+  // 始终按列定义的顺序输出，避免勾选顺序打乱表格与 CSV
+  return Object.keys(cState.columnDefs[kind]).filter((key) => picked.includes(key));
 }
 
-function cellText(c, col) {
-  if (col === "remark") return c.remark || c.nickname || c.wxid || "";
-  if (col === "region") {
-    return [c.country, c.province, c.city].filter(Boolean).join(" ");
-  }
-  return c[col] || "";
-}
+function renderChatListTable() {
+  const kind = cState.kind;
+  const cols = chatListCols();
+  const defs = cState.columnDefs[kind];
+  const items = chatListItems();
 
-function renderContactTable() {
-  const cols = cState.columns;
-  const items = filteredContacts();
   const thead = $("c-thead");
   thead.innerHTML = "";
   const hr = document.createElement("tr");
   cols.forEach((c) => {
     const th = document.createElement("th");
-    th.textContent = CONTACT_COLS[c] || c;
+    th.textContent = defs[c] || c;
     hr.append(th);
   });
   thead.append(hr);
+  $("c-table").style.setProperty("--cols", cols.length || 1);
 
   const size = cState.pageSize;
   const pages = Math.max(1, Math.ceil(items.length / size));
@@ -1346,21 +1444,20 @@ function renderContactTable() {
   const start = cState.page * size;
   const tbody = $("c-tbody");
   tbody.innerHTML = "";
-  items.slice(start, start + size).forEach((c) => {
+  items.slice(start, start + size).forEach((item) => {
     const tr = document.createElement("tr");
     cols.forEach((col) => {
       const td = document.createElement("td");
-      const v = cellText(c, col);
-      if (col === "avatar" && v) {
-
+      const full = chatListCell(item, col);
+      if (col === "avatar" && full) {
         const wrap = document.createElement("span");
         wrap.className = "avatar-cell";
         const link = document.createElement("a");
-        link.href = v;
+        link.href = full;
         link.target = "_blank";
         link.rel = "noreferrer";
         link.textContent = "头像链接";
-        link.title = v;
+        link.title = full;
         wrap.append(link);
         const btn = document.createElement("button");
         btn.type = "button";
@@ -1369,7 +1466,7 @@ function renderContactTable() {
         btn.onclick = async (ev) => {
           ev.stopPropagation();
           try {
-            await navigator.clipboard.writeText(v);
+            await navigator.clipboard.writeText(full);
             notify("头像链接已复制", "success");
           } catch (e) {
             notify("复制失败");
@@ -1377,39 +1474,75 @@ function renderContactTable() {
         };
         wrap.append(btn);
         td.append(wrap);
+      } else if (col === "members" && full) {
+        const names = item.members || [];
+        td.textContent = names.length > 3
+          ? `${names.slice(0, 3).join("、")} 等 ${names.length} 人`
+          : full;
+        td.title = full;
+      } else if (col === "announcement" && full) {
+        const one = full.replace(/\s+/g, " ");
+        td.textContent = one.length > 40 ? `${one.slice(0, 40)}…` : one;
+        td.title = full;
       } else {
-        td.textContent = v;
-        td.title = v;
+        td.textContent = full;
+        td.title = full;
       }
       tr.append(td);
     });
     tbody.append(tr);
   });
 
-  $("c-count").textContent = `共 ${items.length} 人`;
-  $("c-status").textContent = `共计 ${cState.contacts.length} 人`;
   renderPager($("c-pager"), items.length, size, cState.page,
-    (p) => { cState.page = p; renderContactTable(); });
+    (p) => { cState.page = p; renderChatListTable(); });
 }
 
-$("c-search").addEventListener("input", () => { cState.page = 0; renderContactTable(); });
+function renderChatList() {
+  const kind = cState.kind;
+  $("c-n-contacts").textContent = cState.data.contacts.length || "";
+  $("c-n-groups").textContent = cState.data.groups.length || "";
+  $("c-export").disabled = cState.columns[kind].length === 0;
+  renderChatCols();
+  renderChatListTable();
+}
+
+function setChatListKind(kind) {
+  if (cState.kind === kind) return;
+  cState.kind = kind;
+  cState.page = 0;
+  $("c-cols-wrap").open = false;
+  for (const btn of $("c-scopes").querySelectorAll(".chat-chip")) {
+    btn.classList.toggle("active", btn.dataset.kind === kind);
+  }
+  $("c-search").placeholder = kind === "groups" ? "搜索群聊" : "搜索好友";
+  renderChatList();
+}
+
+$("c-scopes").onclick = (ev) => {
+  const btn = ev.target.closest(".chat-chip");
+  if (btn) setChatListKind(btn.dataset.kind);
+};
+
+$("c-search").addEventListener("input", () => { cState.page = 0; renderChatListTable(); });
 
 $("c-export").onclick = async () => {
-  const cols = cState.columns;
+  const kind = cState.kind;
+  const cols = chatListCols();
   if (!cols.length) { notify("至少选择一列", "warning"); return; }
+  const label = kind === "groups" ? "群聊列表" : "好友列表";
   $("c-export").disabled = true;
-  const popup = floating.open("contacts-export", "正在导出好友列表…");
+  const popup = floating.open("chatlist-export", `正在导出${label}…`);
   try {
-    const res = await api("/api/contacts/export", { columns: cols });
+    const res = await api("/api/chatlist/export", { kind, columns: cols });
     if (!res.ok) return;
-    popup.title.textContent = "好友列表已导出";
+    popup.title.textContent = `${label}已导出`;
     popup.card.dataset.level = "success";
-    popup.body.textContent = `${res.count} 人 · 保存到 ${res.path}`;
+    popup.body.textContent = `${res.count} 条 · 保存到 ${res.path}`;
     floating.finish(popup, 4000);
   } catch (error) { }
   finally {
-    if (!popup.remaining) floating.close("contacts-export");
-    $("c-export").disabled = cState.columns.length === 0;
+    if (!popup.remaining) floating.close("chatlist-export");
+    $("c-export").disabled = cState.columns[kind].length === 0;
   }
 };
 
@@ -1772,7 +1905,7 @@ $("btn-download-all").onclick = async () => {
 restoreMoments();
 pollDiagnostics();
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") { closeFilter(); show($("pd-overlay"), false); closeSupport(); }
+  if (event.key === "Escape") { closeFilter(); show($("pd-overlay"), false); closeSupport(); window.chatView?.closeTransient?.(); }
   if (event.key === "Tab" && !$("support-overlay").hidden) {
     const focusable = [...$("support-overlay").querySelectorAll("button:not(:disabled), [tabindex='0']")]
       .filter((element) => element.getClientRects().length);

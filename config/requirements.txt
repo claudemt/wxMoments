@@ -17,3 +17,6 @@ uvicorn
 uiautomation; platform_system == "Windows"
 yara-python; platform_system == "Windows"
 zstandard
+
+# 可选：自动抓取数据库密钥的本地扩展，未安装时回退到 config.json 里的 db_key
+# wx_key

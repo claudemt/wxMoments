@@ -2,7 +2,12 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 runtime/
+src/runtime/
 output/
 config/config.json
 .DS_Store
 Thumbs.db
+*.log
+
+# 第三方参考工程与需求文档（含 GPL 代码，不入库）
+reference/

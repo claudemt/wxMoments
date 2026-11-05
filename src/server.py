@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
@@ -35,6 +35,7 @@ from wechat_download import exporter, harvest, wechat
 from wechat_download.config import HOST, OUTPUT_DIR, PORT, PROXY_PORT, WEB_DIR
 import wxmoments
 import wechat_labels
+import wxchat
 from author_watch import AuthorWatch
 from web_runtime import Job, JOBS as _JOBS, start_job, diagnostics, install_browser_logging
 from wechat_decrypt_tool.modules.logging_config import get_logger
@@ -110,12 +111,27 @@ app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
 @app.post("/api/reveal")
 async def api_reveal(payload: dict):
-    path = Path(payload.get("path") or OUTPUT_DIR)
+    """在资源管理器里打开导出目录；只允许 output 下的路径。"""
+    root = OUTPUT_DIR.resolve()
+    raw = str((payload or {}).get("path") or "").strip()
+    path = Path(raw) if raw else root
+    if not path.is_absolute():
+        # 兼容前端传 "output/xxx" 这种相对项目根的写法
+        candidate = root / path
+        if not candidate.exists() and (BASE_DIR / path).exists():
+            candidate = BASE_DIR / path
+        path = candidate
+    try:
+        path = path.resolve()
+    except Exception:
+        path = root
+    if path != root and root not in path.parents:
+        path = root
     if not path.exists():
-        path = OUTPUT_DIR
+        return {"ok": False, "msg": f"目录不存在：{path}"}
     try:
         subprocess.Popen(["explorer", str(path)])
-        return {"ok": True}
+        return {"ok": True, "path": str(path)}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
 
@@ -165,6 +181,8 @@ async def api_export(payload: dict):
         return _start_moments_export(payload)
     if kind == "moments_group":
         return _start_moments_group_export(payload)
+    if kind == "chat":
+        return wxchat.start_export(payload, start_job=start_job, output_root=_output_root())
     return JSONResponse({"ok": False, "msg": "未知的导出类型"}, status_code=400)
 
 
@@ -1199,7 +1217,7 @@ async def api_moments_groups_delete(payload: dict):
         return {"ok": False, "msg": str(exc)}
 
 
-CONTACT_COLUMNS: dict[str, str] = {
+CHATLIST_CONTACT_COLUMNS: dict[str, str] = {
     "remark": "备注名",
     "nickname": "实际名称",
     "wechat_id": "微信号",
@@ -1208,49 +1226,86 @@ CONTACT_COLUMNS: dict[str, str] = {
     "description": "备注",
     "wxid": "用户ID",
     "common_groups": "共同群数",
+    "pinned": "置顶",
+    "muted": "免打扰",
     "avatar": "头像链接",
 }
 
+CHATLIST_GROUP_COLUMNS: dict[str, str] = {
+    "name": "群名称",
+    "remark": "备注名",
+    "pinned": "置顶",
+    "folded": "折叠",
+    "owner": "群主",
+    "member_count": "成员数",
+    "members": "群成员",
+    "announcement": "群公告",
+    "muted": "免打扰",
+    "in_room": "在群内",
+    "room_id": "群ID",
+    "avatar": "群头像",
+}
 
-@app.post("/api/contacts/all")
-async def api_contacts_all(payload: dict):
+
+def _chatlist_cell(item: dict[str, Any], column: str) -> str:
+    value = item.get(column)
+    if column == "remark":
+        if value:
+            return str(value)
+        if "room_id" in item:
+            return ""      # 群备注多为空，留白比重复群名更清楚
+        return str(item.get("nickname") or item.get("wxid") or "")
+    if column == "region":
+        return " ".join(x for x in (item.get("country"), item.get("province"),
+                                    item.get("city")) if x)
+    if column == "members":
+        return "、".join(value or [])
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    return str(value or "")
+
+
+@app.post("/api/chatlist/all")
+async def api_chatlist_all(payload: dict):
     try:
         account_dir = _moments_ready()
-        details = await run_in_threadpool(wxmoments.load_contact_details, account_dir)
-        return {"ok": True, "contacts": details, "total": len(details),
-                "columns": CONTACT_COLUMNS}
+        contacts = await run_in_threadpool(wxmoments.load_contact_details, account_dir)
+        groups = await run_in_threadpool(wxmoments.load_group_details, account_dir)
+        return {"ok": True, "contacts": contacts, "groups": groups,
+                "contact_columns": CHATLIST_CONTACT_COLUMNS,
+                "group_columns": CHATLIST_GROUP_COLUMNS}
     except Exception as exc:
         return {"ok": False, "msg": str(exc)}
 
 
-@app.post("/api/contacts/export")
-async def api_contacts_export(payload: dict):
+@app.post("/api/chatlist/export")
+async def api_chatlist_export(payload: dict):
     try:
         account_dir = _moments_ready()
+        kind = str(payload.get("kind") or "contacts").strip()
+        if kind not in ("contacts", "groups"):
+            return {"ok": False, "msg": "未知的导出类型"}
+        columns_def = (CHATLIST_CONTACT_COLUMNS if kind == "contacts"
+                       else CHATLIST_GROUP_COLUMNS)
         requested = payload.get("columns") or []
-        columns = list(dict.fromkeys(c for c in requested if c in CONTACT_COLUMNS))
+        columns = list(dict.fromkeys(c for c in requested if c in columns_def))
         if not columns:
             return {"ok": False, "msg": "请至少选择一个有效的导出列"}
-        details = await run_in_threadpool(wxmoments.load_contact_details, account_dir)
+        if kind == "contacts":
+            items = await run_in_threadpool(wxmoments.load_contact_details, account_dir)
+            prefix = "好友列表"
+        else:
+            items = await run_in_threadpool(wxmoments.load_group_details, account_dir)
+            prefix = "群聊列表"
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        path = OUTPUT_DIR / f"好友列表-{ts}.csv"
+        path = OUTPUT_DIR / f"{prefix}-{ts}.csv"
         with open(path, "w", encoding="utf-8-sig", newline="") as fp:
             writer = csv.writer(fp)
-            writer.writerow([CONTACT_COLUMNS[c] for c in columns])
-            for item in details:
-                row = []
-                for c in columns:
-                    if c == "remark":
-
-                        row.append(item.get("remark") or item.get("nickname") or item.get("wxid") or "")
-                    elif c == "region":
-                        row.append(" ".join(x for x in (
-                            item.get("country"), item.get("province"), item.get("city")) if x))
-                    else:
-                        row.append(str(item.get(c) or ""))
-                writer.writerow(row)
-        return {"ok": True, "path": str(path), "count": len(details)}
+            writer.writerow([columns_def[c] for c in columns])
+            for item in items:
+                writer.writerow([_chatlist_cell(item, c) for c in columns])
+        return {"ok": True, "path": str(path), "count": len(items)}
     except Exception as exc:
         return {"ok": False, "msg": str(exc)}
 
@@ -1352,6 +1407,51 @@ async def api_moments_post_detail(payload: dict):
         return {"ok": True, "detail": detail}
     except Exception as exc:
         return {"ok": False, "msg": str(exc)}
+
+
+@app.get("/api/chat/status")
+async def api_chat_status():
+    return wxchat.status()
+
+
+@app.post("/api/chat/init")
+async def api_chat_init(payload: dict):
+    return wxchat.start_refresh(payload, start_job=start_job, acquire_key=_moments_acquire_key)
+
+
+@app.post("/api/chat/sessions")
+async def api_chat_sessions(payload: dict):
+    try:
+        return await run_in_threadpool(wxchat.sessions, payload or {})
+    except Exception as exc:
+        return {"ok": False, "msg": str(exc)}
+
+
+@app.post("/api/chat/messages")
+async def api_chat_messages(payload: dict):
+    try:
+        return await run_in_threadpool(wxchat.messages, payload or {})
+    except Exception as exc:
+        return {"ok": False, "msg": str(exc)}
+
+
+@app.get("/api/chat/media")
+async def api_chat_media(kind: str = "image_full", session: str = "", create_time: int = 0,
+                         server_id: str = "", filename: str = "", size: int = 0,
+                         md5: str = "", url: str = "", thumb: str = ""):
+    try:
+        data, mime = await run_in_threadpool(
+            wxchat.media_blob,
+            {"kind": kind, "session": session, "create_time": create_time,
+             "server_id": server_id, "filename": filename, "size": size,
+             "md5": md5, "url": url, "thumb": thumb},
+        )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "msg": str(exc)}, status_code=404)
+    if not data:
+        return JSONResponse({"ok": False, "msg": "没有找到本地媒体缓存"}, status_code=404)
+    return Response(content=data, media_type=mime or "application/octet-stream",
+                    headers={"Cache-Control": "private, max-age=600"})
 
 
 @app.get("/api/job/{job_id}")

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>微信数据导出工具</title>
-<link rel="stylesheet" href="/static/style.css?v=34">
+<link rel="stylesheet" href="/static/style.css?v=55">
 </head>
 <body>
 <div class="app">
@@ -32,19 +32,17 @@
   <nav class="tabs">
     <button class="tab active" id="tab-moments">朋友圈导出</button>
     <button class="tab" id="tab-wechat">公众号导出</button>
-    <button class="tab" id="tab-contacts">好友列表导出</button>
+    <button class="tab" id="tab-contacts">聊天列表导出</button>
+    <button class="tab" id="tab-chat">聊天记录导出</button>
   </nav>
 
   <section class="panel" id="panel-moments">
-    <div class="moments-head">
-      <div>
-        <strong>朋友圈导出</strong>
-        <span class="muted" id="m-status"></span>
-      </div>
-      <div class="art-buttons">
-        <button class="primary" id="m-init">刷新</button>
+    <div class="head">
+      <div class="head-acts">
+        <button class="ghost" id="m-init">刷新</button>
         <button class="primary" id="m-export" disabled>下载</button>
       </div>
+      <span class="head-note" id="m-status"></span>
     </div>
 
     <div class="m-body" id="m-body" hidden>
@@ -56,7 +54,7 @@
           筛选<span class="m-filter-state" id="m-filter-state"></span>
         </button>
         <button class="ghost" id="m-select-all">全选</button>
-        <span class="muted" id="m-list-count"></span>
+        <span class="muted m-count" id="m-list-count"></span>
       </div>
       <div class="m-list-head">
         <span class="muted">时间</span><span class="muted">作者</span><span class="muted">内容</span><span class="muted">媒体</span>
@@ -110,24 +108,24 @@
   </section>
 
   <section class="panel" id="panel-contacts" hidden>
-    <div class="moments-head">
-      <div>
-        <strong>好友列表导出</strong>
-        <span class="muted" id="c-status"></span>
-      </div>
-      <div class="art-buttons">
-        <button class="primary" id="c-init">刷新</button>
-        <button class="primary" id="c-export" disabled>导出</button>
+    <div class="head">
+      <div class="head-acts">
+        <button class="ghost" id="c-init">刷新</button>
+        <button class="primary" id="c-export" disabled>下载</button>
       </div>
     </div>
 
     <div class="m-body" id="c-body" hidden>
-      <div class="c-cols" id="c-cols"></div>
-
-      <div class="c-bar">
-        <input id="c-search" type="text" spellcheck="false"
-               placeholder="搜索好友">
-        <span class="muted" id="c-count"></span>
+      <div class="c-toolbar">
+        <div class="chat-chips c-scopes" id="c-scopes">
+          <button class="chat-chip active" data-kind="contacts">好友 <b id="c-n-contacts"></b></button>
+          <button class="chat-chip" data-kind="groups">群聊 <b id="c-n-groups"></b></button>
+        </div>
+        <input id="c-search" type="text" spellcheck="false" placeholder="搜索好友">
+        <details class="c-cols" id="c-cols-wrap">
+          <summary title="选择要导出的字段">列 <span id="c-cols-n"></span></summary>
+          <div class="c-cols-box" id="c-cols"></div>
+        </details>
       </div>
 
       <div class="c-table-wrap">
@@ -199,6 +197,99 @@
     </div>
   </div>
 
+  <section class="panel" id="panel-chat" hidden>
+    <div class="head">
+      <div class="head-acts">
+        <button class="ghost" id="chat-init">刷新</button>
+        <button class="primary" id="chat-export" disabled>下载</button>
+      </div>
+      <span class="head-note" id="chat-status"></span>
+    </div>
+
+    <div class="m-body" id="chat-body" hidden>
+      <div class="m-tools">
+        <button class="ghost m-filter-btn" id="chat-filter-btn">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M4 6h16M7 12h10M10 18h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          筛选<span class="m-filter-state" id="chat-filter-state"></span>
+        </button>
+        <button class="ghost" id="chat-select-all">全选</button>
+        <span class="muted m-count" id="chat-count"></span>
+      </div>
+      <div class="m-list-head chat-head">
+        <span></span><span class="muted">会话</span><span class="muted">最近消息</span>
+        <span class="muted">时间</span><span></span>
+      </div>
+      <div class="list" id="chat-list" tabindex="-1"></div>
+      <div class="pager" id="chat-pager"></div>
+    </div>
+  </section>
+
+  <div class="overlay" id="chat-filter-overlay" hidden>
+    <div class="filter-modal" role="dialog" aria-modal="true" aria-label="筛选聊天记录">
+      <div class="fm-head">
+        <strong>筛选聊天记录</strong>
+        <button class="fm-close" id="cf-close" title="关闭">✕</button>
+      </div>
+
+      <div id="cf-pane-session">
+        <div class="fm-dates">
+          <label>开始 <input type="date" id="cf-start"></label>
+          <label>结束 <input type="date" id="cf-end"></label>
+        </div>
+        <div class="chat-kind-head">
+          <span>消息类型</span>
+          <button class="chat-mini" id="cf-kinds-all" type="button">清空</button>
+        </div>
+        <div class="chat-kinds" id="cf-kinds"></div>
+        <div class="m-friends-head">
+          <input id="cf-search" type="text" spellcheck="false" placeholder="搜索会话">
+        </div>
+        <div class="chat-chips" id="cf-scopes">
+          <button class="chat-chip active" data-scope="chat">私聊+群聊</button>
+          <button class="chat-chip" data-scope="private">私聊</button>
+          <button class="chat-chip" data-scope="group">群聊</button>
+        </div>
+        <label class="chat-kind chat-switch" id="cf-folded-row">
+          <input type="checkbox" id="cf-folded">
+          <span>显示折叠群聊</span>
+        </label>
+        <div class="chat-result-head">
+          <span class="muted" id="cf-result-count">符合条件的会话</span>
+          <button class="chat-mini" id="cf-result-all" type="button">全选结果</button>
+        </div>
+        <div class="chat-result" id="cf-result"></div>
+      </div>
+
+      <div class="fm-foot">
+        <button class="ghost" id="cf-reset">清除</button>
+        <button class="primary" id="cf-apply">完成</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="chat-preview-overlay" hidden>
+    <div class="pd-modal chat-preview" role="dialog" aria-modal="true" aria-label="聊天记录预览">
+      <div class="fm-head">
+        <strong id="cp-title">聊天记录</strong>
+        <button class="fm-close" id="cp-close" title="关闭">✕</button>
+      </div>
+      <div class="chat-preview-tools">
+        <input id="cp-keyword" type="text" spellcheck="false" placeholder="搜索消息">
+        <div class="chat-chips" id="cp-kinds"></div>
+      </div>
+      <div class="pd-body chat-preview-body" id="cp-body"></div>
+      <div class="chat-preview-foot">
+        <span class="muted" id="cp-meta"></span>
+        <span class="chat-foot-actions">
+          <button class="ghost" id="cp-all" hidden>加载全部</button>
+          <button class="ghost" id="cp-older" hidden>加载更早消息</button>
+        </span>
+      </div>
+    </div>
+  </div>
+
   <div class="overlay" id="support-overlay" hidden>
     <div class="support-modal" role="dialog" aria-modal="true" aria-labelledby="support-title" tabindex="-1">
       <div class="fm-head">
@@ -227,6 +318,7 @@
   </div>
 </div>
 <script src="/static/floating.js?v=4"></script>
-<script src="/static/app.js?v=52"></script>
+<script src="/static/app.js?v=62"></script>
+<script src="/static/chat.js?v=16"></script>
 </body>
 </html>

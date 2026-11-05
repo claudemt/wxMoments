@@ -1342,3 +1342,199 @@ def decrypt_wechat_databases(db_storage_path: str = None, key: str = None,
 
     return result
 
+
+
+def _patch_sqlite_header_page_count(target: Path, page_count: int) -> None:
+    with open(target, "r+b") as fp:
+        header = bytearray(fp.read(100))
+        if len(header) < 100 or not bytes(header[:16]) == SQLITE_HEADER:
+            return
+        header[28:32] = struct.pack(">I", int(page_count))
+        header[24:28] = header[92:96]
+        fp.seek(0)
+        fp.write(bytes(header))
+
+
+def _apply_wal_frames(target: Path, frames: list[tuple[int, int, bytes]]) -> dict[str, Any]:
+    meta: dict[str, Any] = {"frames": len(frames), "applied": 0, "commit_pages": 0}
+    if not frames:
+        return meta
+    commit_pages = 0
+    for _pgno, dbsize, _page in frames:
+        if dbsize:
+            commit_pages = int(dbsize)
+    if commit_pages <= 0:
+        meta["reason"] = "no_commit"
+        return meta
+    with open(target, "r+b") as fp:
+        for pgno, dbsize, page in frames:
+            if pgno <= 0 or pgno > commit_pages:
+                continue
+            fp.seek((pgno - 1) * PAGE_SIZE)
+            fp.write(page)
+            meta["applied"] = int(meta["applied"]) + 1
+        fp.truncate(commit_pages * PAGE_SIZE)
+    _patch_sqlite_header_page_count(target, commit_pages)
+    meta["commit_pages"] = commit_pages
+    return meta
+
+
+def _quick_check_file(path: Path) -> tuple[str, str]:
+    try:
+        conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+        try:
+            rows = conn.execute("pragma quick_check").fetchall()
+            text = " ".join(str(r[0]) for r in rows).strip()
+            return ("ok" if text.lower().startswith("ok") else "failed", text[:300])
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return ("failed", str(exc)[:300])
+
+
+def decrypt_database_snapshot(
+    key_hex: str,
+    source: str | Path,
+    target: str | Path,
+    *,
+    merge_wal: bool = True,
+    progress=None,
+    canceled=None,
+) -> dict[str, Any]:
+    source = Path(source).expanduser().resolve()
+    target = Path(target).expanduser().resolve()
+    meta: dict[str, Any] = {
+        "source": source.name,
+        "destination": target.name,
+        "source_bytes": 0,
+        "page_count": 0,
+        "page_size": PAGE_SIZE,
+        "decrypted_pages": 0,
+        "failed_pages": 0,
+        "hmac_warnings": 0,
+        "key_mode": "",
+        "wal_found": False,
+        "wal_frames": 0,
+        "wal_committed": None,
+        "wal_applied_pages": 0,
+        "integrity": "not_checked",
+        "integrity_detail": "",
+        "diagnostics": [],
+        "status": "failed",
+    }
+    try:
+        key_bytes = bytes.fromhex(str(key_hex or "").strip())
+    except ValueError:
+        meta["diagnostics"].append("密钥格式无效")
+        meta["error"] = "key_format"
+        return meta
+    if len(key_bytes) != KEY_SIZE:
+        meta["diagnostics"].append("密钥长度无效")
+        meta["error"] = "key_length"
+        return meta
+    if not source.is_file():
+        meta["diagnostics"].append("源数据库不存在")
+        meta["error"] = "missing_source"
+        return meta
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_target = target.with_name(target.name + ".partial")
+    try:
+        with open(source, "rb") as fp:
+            first = fp.read(PAGE_SIZE)
+            if len(first) < PAGE_SIZE:
+                meta["diagnostics"].append("数据库文件不完整")
+                meta["error"] = "file_too_small"
+                return meta
+            meta["source_bytes"] = source.stat().st_size
+            if first.startswith(SQLITE_HEADER):
+                with open(tmp_target, "wb") as out:
+                    out.write(first)
+                    while True:
+                        chunk = fp.read(PAGE_SIZE * 64)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                meta["status"] = "plain"
+                meta["integrity"], meta["integrity_detail"] = _quick_check_file(tmp_target)
+                meta["page_count"] = tmp_target.stat().st_size // PAGE_SIZE
+                tmp_target.replace(target)
+                return meta
+
+            resolved = _resolve_page1_key_material(key_bytes, first)
+            if resolved is None:
+                meta["diagnostics"].append("密钥与数据库不匹配")
+                meta["error"] = "key_mismatch"
+                return meta
+            enc_key, mac_key, key_mode = resolved
+            meta["key_mode"] = key_mode
+
+            with open(tmp_target, "wb") as out:
+                page_num = 0
+                page = first
+                while page:
+                    if canceled is not None and canceled():
+                        raise RuntimeError("已取消")
+                    page_num += 1
+                    if len(page) < PAGE_SIZE:
+                        page = page + b"\x00" * (PAGE_SIZE - len(page))
+                    stored = page[PAGE_SIZE - HMAC_SIZE:PAGE_SIZE]
+                    if not hmac.compare_digest(stored, _compute_page_hmac(mac_key, page, page_num)):
+                        meta["hmac_warnings"] = int(meta["hmac_warnings"]) + 1
+                    try:
+                        out.write(_decrypt_page(enc_key, page, page_num))
+                        meta["decrypted_pages"] = int(meta["decrypted_pages"]) + 1
+                    except Exception:
+                        meta["failed_pages"] = int(meta["failed_pages"]) + 1
+                        out.write((SQLITE_HEADER if page_num == 1 else b"") + b"\x00" * PAGE_SIZE)
+                    if progress is not None and page_num % 512 == 0:
+                        progress(page_num)
+                    page = fp.read(PAGE_SIZE)
+        meta["page_count"] = int(meta["decrypted_pages"])
+
+        wal_path = source.with_name(source.name + "-wal")
+        if merge_wal and wal_path.is_file():
+            meta["wal_found"] = True
+            frames, count, _salt = _parse_sqlcipher_wal_frames(enc_key, wal_path)
+            meta["wal_frames"] = count
+            try:
+                applied = _apply_wal_frames(tmp_target, frames)
+                meta["wal_applied_pages"] = int(applied.get("applied") or 0)
+                meta["wal_committed"] = bool(applied.get("commit_pages"))
+                if applied.get("reason") and frames:
+                    meta["diagnostics"].append("WAL 无已提交帧")
+            except Exception as exc:
+                meta["diagnostics"].append(f"WAL 合并失败：{exc}")
+                meta["wal_committed"] = False
+
+        meta["integrity"], meta["integrity_detail"] = _quick_check_file(tmp_target)
+        if meta["failed_pages"]:
+            meta["status"] = "degraded"
+            meta["diagnostics"].append(f"{meta['failed_pages']} 个数据页解密失败")
+        elif meta["hmac_warnings"]:
+            meta["status"] = "degraded"
+            meta["diagnostics"].append(f"{meta['hmac_warnings']} 个数据页校验值异常")
+        elif meta["integrity"] != "ok":
+            meta["status"] = "degraded"
+            meta["diagnostics"].append(f"完整性检查：{meta['integrity_detail'] or meta['integrity']}")
+        else:
+            meta["status"] = "ok"
+        if meta["status"] == "degraded" and meta["decrypted_pages"] <= 0:
+            meta["status"] = "failed"
+        if meta["status"] == "failed":
+            meta["error"] = "degraded_unusable"
+            return meta
+        tmp_target.replace(target)
+        meta["destination_bytes"] = target.stat().st_size
+        return meta
+    except Exception as exc:
+        meta["error"] = " ".join(str(exc).split())[:200]
+        meta["diagnostics"].append(meta["error"])
+        meta["status"] = "failed"
+        return meta
+    finally:
+        if tmp_target.exists():
+            try:
+                tmp_target.unlink()
+            except OSError:
+                pass

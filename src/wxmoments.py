@@ -1062,6 +1062,115 @@ def parse_contact_extra_buffer(blob: Any) -> dict[str, str]:
     return out
 
 
+# contact.flag 的位含义（微信 4.x），与 chat_reader 中的定义保持一致。
+CONTACT_FLAG_MUTED = 1 << 9
+CONTACT_FLAG_PINNED = 1 << 11
+CONTACT_FLAG_FOLDED = 1 << 28
+
+
+def contact_flag_states(flag: int) -> dict[str, bool]:
+    """把 contact.flag 拆成置顶 / 折叠 / 免打扰三个布尔值。"""
+    return {
+        "pinned": bool(flag & CONTACT_FLAG_PINNED),
+        "folded": bool(flag & CONTACT_FLAG_FOLDED),
+        "muted": bool(flag & CONTACT_FLAG_MUTED),
+    }
+
+
+def _member_name(row: sqlite3.Row, self_usernames: set[str]) -> str:
+    if decode_contact_text(row_value(row, "u")) in self_usernames:
+        return "我"
+    return (decode_contact_text(row_value(row, "rm"))
+            or decode_contact_text(row_value(row, "nn"))
+            or decode_contact_text(row_value(row, "u")))
+
+
+def load_group_details(account_dir: Path) -> list[dict[str, Any]]:
+    """读取全部群聊：备注、置顶/折叠、群主、成员、公告。
+
+    群成员来自 chatroom_member → contact；群主与公告分别取自 chat_room
+    与 chat_room_info_detail。缺失的表一律降级为空，不影响其余字段。
+    """
+    contact_db = account_dir / "contact.db"
+    if not contact_db.exists():
+        return []
+    self_usernames = {clean_account_name(account_dir.name), account_dir.name}
+    conn = sqlite3.connect(str(contact_db))
+    conn.row_factory = sqlite3.Row
+    try:
+        members: dict[int, list[str]] = {}
+        try:
+            for row in conn.execute(
+                "SELECT cm.room_id AS rid, c.username AS u, c.remark AS rm, c.nick_name AS nn "
+                "FROM chatroom_member cm JOIN contact c ON c.id = cm.member_id"
+            ):
+                name = _member_name(row, self_usernames)
+                if name:
+                    members.setdefault(int_row_value(row, "rid"), []).append(name)
+        except Exception:
+            members = {}
+
+        owners: dict[int, str] = {}
+        try:
+            for row in conn.execute(
+                "SELECT r.id AS rid, r.owner AS ow, c.remark AS rm, c.nick_name AS nn "
+                "FROM chat_room r LEFT JOIN contact c ON c.username = r.owner"
+            ):
+                owners[int_row_value(row, "rid")] = (
+                    decode_contact_text(row_value(row, "rm"))
+                    or decode_contact_text(row_value(row, "nn"))
+                    or decode_contact_text(row_value(row, "ow")))
+        except Exception:
+            owners = {}
+
+        announcements: dict[int, str] = {}
+        try:
+            for row in conn.execute(
+                "SELECT room_id_ AS rid, announcement_ AS ann FROM chat_room_info_detail"
+            ):
+                text = decode_contact_text(row_value(row, "ann")).strip()
+                if text:
+                    announcements[int_row_value(row, "rid")] = text
+        except Exception:
+            announcements = {}
+
+        out: list[dict[str, Any]] = []
+        for row in conn.execute(
+            "SELECT * FROM contact WHERE username LIKE '%@chatroom'"
+        ):
+            username = decode_contact_text(row_value(row, "username"))
+            if not username or int_row_value(row, "delete_flag"):
+                continue
+            gid = int_row_value(row, "id")
+            name = decode_contact_text(row_value(row, "nick_name"))
+            remark = decode_contact_text(row_value(row, "remark"))
+            member_names = sorted(members.get(gid) or [], key=str.casefold)
+            if not name and not remark:
+                # 未命名群：微信侧栏用前几位成员名拼接，这里照做
+                name = "、".join(member_names[:3])
+                if len(member_names) > 3:
+                    name += "…"
+                name = name or f"群聊 {username.split('@')[0][-6:]}"
+            item = {
+                "room_id": username,
+                "name": name,
+                "remark": remark,
+                "owner": owners.get(gid, ""),
+                "member_count": len(member_names),
+                "members": member_names,
+                "announcement": announcements.get(gid, ""),
+                "avatar": decode_contact_text(row_value(row, "small_head_url")),
+                "in_room": int_row_value(row, "is_in_chat_room") != 0,
+            }
+            item.update(contact_flag_states(int_row_value(row, "flag")))
+            out.append(item)
+    finally:
+        conn.close()
+    out.sort(key=lambda g: ((not g["pinned"]),
+                            (g["remark"] or g["name"] or g["room_id"]).casefold()))
+    return out
+
+
 def load_contact_details(account_dir: Path) -> list[dict[str, Any]]:
     contact_db = account_dir / "contact.db"
     if not contact_db.exists():
@@ -1115,10 +1224,14 @@ def load_contact_details(account_dir: Path) -> list[dict[str, Any]]:
                     "city": eb.get("city", ""),
                     "avatar": decode_contact_text(row_value(row, "big_head_url")),
                     "common_groups": group_count.get(username, 0),
+                    **contact_flag_states(int_row_value(row, "flag")),
                 })
     finally:
         conn.close()
-    return [details[k] for k in sorted(details, key=lambda k: (details[k]["remark"] or details[k]["nickname"] or k).casefold())]
+    return [details[k] for k in sorted(
+        details,
+        key=lambda k: (not details[k]["pinned"],
+                       (details[k]["remark"] or details[k]["nickname"] or k).casefold()))]
 
 
 def build_contact_lookup(contacts: list[ContactEntry]) -> dict[str, list[ContactEntry]]:
@@ -2003,25 +2116,69 @@ def render_pdf_chromium(html_path: Path, pdf_path: Path) -> None:
     if not browser:
         raise RuntimeError("未找到 Chrome/Edge/Chromium")
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="chrome-pdf-", dir=str(RUNTIME_DIR)) as user_data_dir:
+    timeout = int(os.environ.get("WX_MOMENTS_CHROME_TIMEOUT", "240"))
+    code = 0
+    output = ""
+    with tempfile.TemporaryDirectory(prefix="chrome-pdf-", dir=str(RUNTIME_DIR)) as user_data_dir, \
+            tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as log:
         command = [
             browser,
             "--headless=new",
             "--disable-gpu",
             "--no-sandbox",
+            "--no-first-run",
+            "--disable-extensions",
+            "--disable-background-networking",
             "--allow-file-access-from-files",
             "--no-pdf-header-footer",
             f"--user-data-dir={user_data_dir}",
             f"--print-to-pdf={pdf_path.resolve()}",
             html_path.resolve().as_uri(),
         ]
-        timeout = int(os.environ.get("WX_MOMENTS_CHROME_TIMEOUT", "600"))
-        proc = subprocess.run(command, text=True, capture_output=True, timeout=timeout)
-        if proc.returncode != 0:
-            message = (proc.stderr or proc.stdout or "").strip()
-            raise RuntimeError("浏览器 PDF 生成失败: " + " / ".join(message.splitlines()[-3:]))
+        # 不用管道读取输出：浏览器子进程可能持有句柄导致 communicate() 一直不返回
+        proc = subprocess.Popen(command, stdout=log, stderr=log, stdin=subprocess.DEVNULL)
+        import time as _time
+
+        deadline = _time.time() + timeout
+        stable = 0
+        last_size = -1
+        while True:
+            if proc.poll() is not None:
+                break
+            try:
+                size = pdf_path.stat().st_size if pdf_path.exists() else 0
+            except OSError:
+                size = 0
+            if size > 0:
+                if size == last_size:
+                    stable += 1
+                else:
+                    stable = 0
+                    last_size = size
+                # 文件大小连续 2s 不变即视为打印完成，无需等待浏览器进程退出
+                if stable >= 5:
+                    with contextlib.suppress(Exception):
+                        proc.kill()
+                    with contextlib.suppress(Exception):
+                        proc.wait(timeout=20)
+                    break
+            if _time.time() > deadline:
+                with contextlib.suppress(Exception):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=20)
+                break
+            _time.sleep(0.4)
+        code = proc.returncode or 0
+        log.seek(0)
+        output = log.read().strip()
     if not pdf_path.exists() or not pdf_path.read_bytes().startswith(b"%PDF"):
-        raise RuntimeError("浏览器生成的 PDF 数据无效")
+        detail = " / ".join(output.splitlines()[-3:]) or f"退出码 {code}"
+        raise RuntimeError("浏览器 PDF 生成失败: " + detail)
+    with contextlib.suppress(OSError), open(pdf_path, "rb") as fp:
+        fp.seek(max(0, pdf_path.stat().st_size - 2048))
+        if b"%%EOF" not in fp.read():
+            raise RuntimeError("浏览器生成的 PDF 数据不完整")
 
 
 def render_pdf(output: Path, posts: list[ExportedPost], pdf_path: Path) -> None:

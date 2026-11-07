@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="wx-build" content="2026-11-07.7">
 <title>微信数据导出工具</title>
-<link rel="stylesheet" href="/static/style.css?v=55">
+<link rel="stylesheet" href="/static/style.css?v=57">
 </head>
 <body>
 <div class="app">
@@ -43,6 +44,10 @@
         <button class="primary" id="m-export" disabled>下载</button>
       </div>
       <span class="head-note" id="m-status"></span>
+    </div>
+
+    <div class="m-body" id="m-empty">
+      <p class="c-notice">点上方「刷新」读取微信数据</p>
     </div>
 
     <div class="m-body" id="m-body" hidden>
@@ -116,7 +121,7 @@
     </div>
 
     <div class="m-body" id="c-body" hidden>
-      <div class="c-toolbar">
+      <div class="c-toolbar" id="c-toolbar">
         <div class="chat-chips c-scopes" id="c-scopes">
           <button class="chat-chip active" data-kind="contacts">好友 <b id="c-n-contacts"></b></button>
           <button class="chat-chip" data-kind="groups">群聊 <b id="c-n-groups"></b></button>
@@ -127,6 +132,8 @@
           <div class="c-cols-box" id="c-cols"></div>
         </details>
       </div>
+
+      <p class="c-notice" id="c-notice" hidden></p>
 
       <div class="c-table-wrap">
         <table class="c-table" id="c-table">
@@ -238,23 +245,21 @@
           <label>开始 <input type="date" id="cf-start"></label>
           <label>结束 <input type="date" id="cf-end"></label>
         </div>
-        <div class="chat-kind-head">
-          <span>消息类型</span>
-          <button class="chat-mini" id="cf-kinds-all" type="button">清空</button>
-        </div>
         <div class="chat-kinds" id="cf-kinds"></div>
         <div class="m-friends-head">
           <input id="cf-search" type="text" spellcheck="false" placeholder="搜索会话">
         </div>
-        <div class="chat-chips" id="cf-scopes">
-          <button class="chat-chip active" data-scope="chat">私聊+群聊</button>
-          <button class="chat-chip" data-scope="private">私聊</button>
-          <button class="chat-chip" data-scope="group">群聊</button>
+        <div class="chat-filter-row">
+          <div class="chat-chips" id="cf-scopes">
+            <button class="chat-chip active" data-scope="chat">私聊+群聊</button>
+            <button class="chat-chip" data-scope="private">私聊</button>
+            <button class="chat-chip" data-scope="group">群聊</button>
+          </div>
+          <label class="chat-kind chat-switch" id="cf-folded-row">
+            <input type="checkbox" id="cf-folded">
+            <span>显示折叠群聊</span>
+          </label>
         </div>
-        <label class="chat-kind chat-switch" id="cf-folded-row">
-          <input type="checkbox" id="cf-folded">
-          <span>显示折叠群聊</span>
-        </label>
         <div class="chat-result-head">
           <span class="muted" id="cf-result-count">符合条件的会话</span>
           <button class="chat-mini" id="cf-result-all" type="button">全选结果</button>
@@ -263,7 +268,6 @@
       </div>
 
       <div class="fm-foot">
-        <button class="ghost" id="cf-reset">清除</button>
         <button class="primary" id="cf-apply">完成</button>
       </div>
     </div>
@@ -318,7 +322,7 @@
   </div>
 </div>
 <script src="/static/floating.js?v=4"></script>
-<script src="/static/app.js?v=62"></script>
-<script src="/static/chat.js?v=16"></script>
+<script src="/static/app.js?v=68"></script>
+<script src="/static/chat.js?v=20"></script>
 </body>
 </html>

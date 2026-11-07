@@ -8,17 +8,14 @@ except ImportError:
 import time
 import psutil
 import subprocess
-import hashlib
 import os
 import json
 import re
-import random
 import logging
 import asyncio
 import importlib
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from dataclasses import dataclass
 from .wechat_detection import detect_wechat_installation, parse_global_config
 from .dll_key_scan import extract_xor_keys_from_dll
 from .image_key_resolver import (

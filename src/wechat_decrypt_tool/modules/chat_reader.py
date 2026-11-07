@@ -25,7 +25,6 @@ MAX_FORWARD_DEPTH = 3
 DEFAULT_LIMIT = 60
 MAX_LIMIT = 1000
 
-# contact.flag 的位含义（微信 4.x）：bit11 置顶，bit28 折叠。
 CONTACT_FLAG_PINNED = 1 << 11
 CONTACT_FLAG_FOLDED = 1 << 28
 
@@ -34,7 +33,6 @@ SKIP_SESSIONS = frozenset({
     "floatbottle", "qqmail", "weixin", "notifymessage", "weixinreminder",
 })
 
-# 系统账号的 contact.flag 也带置顶位，但微信侧栏不把它们排进置顶区
 PIN_EXEMPT = frozenset({"filehelper", "fmessage", "medianote", "floatbottle",
                         "qqmail", "weixin", "notifymessage", "weixinreminder"})
 
@@ -178,7 +176,6 @@ def _attr(root: ET.Element | None, path: str, name: str) -> str:
 
 
 def _strip_markup(value: str) -> str:
-    """系统消息里的 replacemsg 可能内嵌一段简易富文本，取出纯文字。"""
     text = str(value or "")
     if not text:
         return ""
@@ -194,7 +191,6 @@ _MACHINE_NAME = re.compile(r"^(?:wxid_[A-Za-z0-9_\-]+|gh_[A-Za-z0-9_\-]+|\d+@cha
 
 
 def _clean_fragment(value: str) -> str:
-    """引用 / 转述里的片段可能是一整段 XML（表情、图文、小程序），只取可读文字。"""
     text = str(value or "").strip()
     if not text:
         return ""
@@ -230,7 +226,6 @@ def _clean_fragment(value: str) -> str:
 
 
 def _xml_fragment_text(fragment: str) -> str:
-    """XML 解析失败（被截断 / 属性过长）时的兜底：按标签名判断类型，再取标题或去标签。"""
     lowered = fragment[:4000]
     if "<emoji" in lowered:
         return "[动画表情]"
@@ -251,7 +246,6 @@ def _xml_fragment_text(fragment: str) -> str:
 
 
 def _pat_text(text: str, names: dict[str, str]) -> str:
-    """模板里的 ${wxid} / $username$ 之类占位符替换成显示名。"""
     def repl(match: re.Match[str]) -> str:
         key = match.group(1).strip()
         return names.get(key) or names.get("sender") or ""
@@ -260,9 +254,6 @@ def _pat_text(text: str, names: dict[str, str]) -> str:
     return re.sub(r"\$([A-Za-z0-9_]+)\$", repl, text)
 
 
-# 微信 4.x 的拍一拍文案在中文本地化没生效时会原样落成英文模板：
-#   「张三 tickled 李四's 猫爪」「I  tickled 王五」「张三 tickled me  此功能暂时无法使用」
-# 这里统一还原成微信侧栏的中文说法，并丢掉模板拼接带出来的无关句子。
 _PAT_TICKLE = re.compile(r"^(?P<actor>.*?)\s+tickled\s+(?P<rest>.+)$", re.I)
 _PAT_NOISE = ("撤回了一条消息", "此功能暂时无法使用", "拍了拍", "tickled")
 
@@ -279,7 +270,6 @@ def _pat_suffix(value: str) -> str:
 
 
 def _pat_chinese(text: str, sender: str) -> str:
-    """中文模板：「X 拍了拍 Y 的 xxx」，顺带修掉 me / my 和模板噪声。"""
     match = re.match(r"^(?P<actor>.{0,80}?)拍了拍(?P<rest>.+)$", text)
     if not match:
         return ""
@@ -310,12 +300,9 @@ def _pat_chinese(text: str, sender: str) -> str:
 
 
 def pat_text(text: str, sender: str = "") -> str:
-    """把拍一拍还原成「A 拍了拍 B 的 xxx」；不是拍一拍返回空串。"""
     raw = _strip_markup(text)
-    # 模板里的多段 replacemsg 会被拼进其它系统句（「…撤回了一条消息」），先剔掉
     for noise in ("撤回了一条消息", "此功能暂时无法使用"):
         raw = raw.replace(noise, " ")
-    # 多行也压成一行，正则才好从整段里取主语和目标
     raw = re.sub(r"[ \t\r\n]+", " ", raw).strip()
     if not raw:
         return ""
@@ -393,11 +380,9 @@ _SYSTEM_EN_TEMPLATES: tuple[tuple[str, str], ...] = (
 
 
 def _translate_system(text: str) -> str:
-    """英文系统提示（撤回 / 入群 / 管理员变更）转成中文说法。"""
     value = (text or "").strip()
     if not value:
         return value
-    # 群公告 / 群接龙偶尔会把结构化字段直接落成一行（房间号 类型 id ... wxid）
     if re.match(r"^\d+@chatroom\s+\d", value):
         return "群公告更新"
     if not re.search(r"[A-Za-z]{3,}", value):
@@ -413,9 +398,7 @@ def _translate_system(text: str) -> str:
 
 
 def system_text(root: ET.Element | None, content: str, sender: str = "") -> str:
-    """把 10000/10002 的系统消息转成可读中文，绝不把 XML 原样抛给前端。"""
     def finish(text: str) -> str:
-        # 模板拼接出来的文本常带其它系统句（「…撤回了一条消息」），再洗一遍
         return pat_text(text, sender) or emojify_wechat_shortcodes(_translate_system(text))
 
     if root is None:
@@ -465,7 +448,6 @@ def encode_message_id(shard: int, local_id: int) -> str:
 
 
 def encode_cursor(positions: dict[int, tuple[int, int]]) -> str:
-    """游标按分片记录各自的位置，避免多库合并分页时跳过数据。"""
     payload = json.dumps(
         {"v": 2, "p": {str(k): [v[0], v[1]] for k, v in sorted(positions.items())}},
         separators=(",", ":"),
@@ -484,7 +466,7 @@ def decode_cursor(value: str) -> dict[int, tuple[int, int]] | None:
             return {int(k): (int(v[0]), int(v[1])) for k, v in data["p"].items()}
     except Exception:
         pass
-    try:  # 兼容旧版单一游标
+    try:
         create_time, local_id, shard = raw.split(":", 2)
         return {int(shard): (int(create_time), int(local_id))}
     except Exception:
@@ -552,7 +534,6 @@ class ChatStore:
         return found
 
     def session_range(self, conversation_id: str) -> tuple[int, int]:
-        """会话内消息的时间跨度，用于会话列表的日期筛选。"""
         if conversation_id in self._ranges:
             return self._ranges[conversation_id]
         table = message_table_for(conversation_id)
@@ -620,7 +601,7 @@ class ChatStore:
                 self._conns[path] = _connect(path)
             except sqlite3.Error as exc:
                 logger.warning("%s", exc)
-                self._conns[path] = None  # type: ignore[assignment]
+                self._conns[path] = None
         return self._conns[path]
 
     def tables(self, path: Path) -> set[str]:
@@ -712,7 +693,6 @@ class ChatStore:
         return [dict(row) for row in rows]
 
     def _message_present(self, table: str, paths: list[Path]) -> bool:
-        """表存在不等于有消息：空表（已清空 / 只剩会话壳）不该出现在列表里。"""
         for path in paths:
             conn = self._conn(path)
             if conn is None:
@@ -738,11 +718,10 @@ class ChatStore:
             table = message_table_for(username)
             paths = [path for path in self.message_dbs if table in tables_by_shard[path]]
             if not paths or not self._message_present(table, paths):
-                continue  # 没有可导出的消息，直接不进列表
+                continue
             if username.endswith("@chatroom"):
                 kind = "group"
             elif username.startswith("gh_") or username.endswith("@openim"):
-                # 公众号会话只有文章推送，聊天记录导出对它们没有意义，直接跳过
                 continue
             else:
                 kind = "private"
@@ -756,10 +735,7 @@ class ChatStore:
                 "display": display,
                 "kind": kind,
                 "shards": len(paths),
-                # 置顶标记在 contact.flag 的 bit11，会话表里没有专门列；
-                # 文件传输助手等系统账号同样带这一位，但微信侧栏不把它们放进置顶区
                 "pinned": username in self._pinned and username not in PIN_EXEMPT,
-                # 微信里「折叠该群聊」= contact.flag 的 bit28（实测 53 个命中全是群）
                 "folded": username in self._folded,
                 "unread": int(row.get("unread_count") or 0),
                 "last_time": last_time,
@@ -767,7 +743,6 @@ class ChatStore:
                 "last_summary": _decode_bytes(row.get("summary"))[:120],
                 "last_sender": _decode_bytes(row.get("last_msg_sender")),
             })
-        # 与微信侧栏一致：置顶组在前，组内按最后消息时间倒序；非置顶同样按时间倒序
         out.sort(key=lambda item: (item["pinned"], item["last_time"], item["sort_time"]),
                  reverse=True)
         self._sessions = out
@@ -844,8 +819,6 @@ class ChatStore:
         truncated = False
         exhausted = False
         while len(results) < limit and scanned < scan_budget:
-            # 每个分片都取满 limit 行再归并，保证本页截断点之前的行都已取到；
-            # 若只取 400 行，某些库会「只露出更深的一段」，跨库合并时顺序会乱。
             want = max(1, min(limit, scan_budget - scanned))
             merged: list[tuple[tuple[int, int, int], int, Path, sqlite3.Row]] = []
             per_shard_full = False
@@ -865,7 +838,6 @@ class ChatStore:
             reached = False
             for key, shard, path, row in merged:
                 scanned += 1
-                # 每个分片各自推进游标（多库合并时单一游标会漏数据）
                 positions[shard] = (key[0], key[1])
                 message = self._build_message(row, self._name_map(path), conversation_id, shard)
                 if wanted_kind not in ("", "all") and message["kind"] != wanted_kind:
@@ -956,11 +928,9 @@ class ChatStore:
             message["kind"] = "sticker"
             root = _xml_root(content)
             extra.update({
-                # 老表情常常只带 androidmd5，缺了它就彻底找不到原图
                 "md5": _attr(root, "emoji", "md5") or _attr(root, "emoji", "androidmd5"),
                 "product": _attr(root, "emoji", "productid"),
                 "size": _attr(root, "emoji", "len") or _attr(root, "emoji", "androidlen"),
-                # 表情缓存到本机的是加密副本，直接按消息里的 CDN 地址取原图更可靠
                 "cdnurl": _attr(root, "emoji", "cdnurl"),
                 "thumburl": _attr(root, "emoji", "thumburl"),
                 "aeskey": _attr(root, "emoji", "aeskey"),
@@ -1049,7 +1019,6 @@ class ChatStore:
         if not url and descr.startswith(("http://", "https://")):
             url, descr = descr, ""
         if "拍了拍" in title and not url:
-            # 微信把「拍一拍」装在 appmsg/type=62 里，不是视频号内容
             message["kind"] = "system"
             message["text"] = (pat_text(title, message.get("sender_display") or "")
                                or emojify_wechat_shortcodes(title))
@@ -1133,10 +1102,8 @@ class ChatStore:
         if source:
             extra["source"] = source[:60]
         if source_id.lower().startswith("gh_") or source_id.lower().endswith("@app"):
-            # 公众号文章 / 小程序：卡片上要能一眼看出是「内容号」
             extra["source_id"] = source_id[:80]
             extra["official"] = source_id.lower().startswith("gh_")
-        # 兜底：任何分支都不允许把原始 XML 抛给前端
         for key in ("text", "title"):
             if str(message.get(key) or "").lstrip().startswith("<"):
                 message[key] = _clean_fragment(message[key])

@@ -20,7 +20,6 @@ from .sqlite_diagnostics import collect_sqlite_diagnostics, sqlite_diagnostics_s
 from .constants import (
     DB_KEY_HEX_LENGTH,
     INTERNAL_DB_KEY_BYTE_LENGTH,
-    IMAGE_XOR_KEY_MAX,
 )
 
 SQLITE_HEADER = b"SQLite format 3\x00"

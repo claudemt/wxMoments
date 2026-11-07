@@ -9,6 +9,8 @@ $ServerOutLog = Join-Path $RuntimeDir 'server.stdout.log'
 $ServerErrorLog = Join-Path $RuntimeDir 'server.stderr.log'
 $DependencyStamp = Join-Path $RuntimeDir 'dependencies.sha256'
 $Requirements = Join-Path $ProjectDir 'config\requirements.txt'
+$OptionalRequirements = Join-Path $ProjectDir 'config\requirements-optional.txt'
+$OptionalMarker = Join-Path $RuntimeDir 'optional-missing.txt'
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
 $env:WXMOMENTS_RUNTIME_DIR = $RuntimeDir
@@ -19,30 +21,44 @@ function Invoke-Native([scriptblock]$Command) {
     & $Command
     $script:RuntimeExitCode = $LASTEXITCODE
 }
+function Remove-DuplicateEnvVars {
+    try {
+        $vars = [Environment]::GetEnvironmentVariables('Process')
+        $groups = $vars.GetEnumerator() | Group-Object { $_.Key.ToUpperInvariant() }
+        foreach ($group in $groups) {
+            if ($group.Count -le 1) { continue }
+            $keep = $group.Group | Where-Object { $_.Key -ceq $_.Key.ToUpperInvariant() } | Select-Object -First 1
+            if (-not $keep) { $keep = $group.Group[0] }
+            foreach ($item in $group.Group) {
+                if ($item.Key -cne $keep.Key) {
+                    [Environment]::SetEnvironmentVariable($item.Key, $null, 'Process')
+                }
+            }
+            [Environment]::SetEnvironmentVariable($keep.Key, $keep.Value, 'Process')
+        }
+    } catch {
+    }
+}
 
 function Show-StartupError([string]$Message, [string[]]$LogPaths) {
-    $Details = @($Message)
-    foreach ($LogPath in $LogPaths) {
-        if (Test-Path -LiteralPath $LogPath) {
-            $Details += [IO.Path]::GetFileName($LogPath)
-            $Details += Get-Content -LiteralPath $LogPath -Tail 100
-        }
-    }
-    $SafeMessage = [Net.WebUtility]::HtmlEncode($Message)
-    $SafeDetails = [Net.WebUtility]::HtmlEncode(($Details -join "`n"))
-    $ErrorPage = Join-Path $RuntimeDir 'startup-error.html'
-    $Page = @"
-<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>wxMoments - 启动提示</title><style>
-:root{color-scheme:light dark}body{font:15px/1.7 'Microsoft YaHei',sans-serif;margin:40px auto;padding:0 20px;max-width:900px}
-h1{font-size:24px}pre{white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid #8886;padding:16px;border-radius:12px}
-a{color:#07a854}</style><h1>wxMoments 启动未完成</h1><p>$SafeMessage</p>
-<p>解决下方问题后，重新双击 run.bat。详细记录保存在项目的 runtime 目录。</p>
-<details open><summary>启动记录</summary><pre>$SafeDetails</pre></details></html>
-"@
-    [IO.File]::WriteAllText($ErrorPage, $Page, [Text.UTF8Encoding]::new($false))
-    if (-not $env:WXMOMENTS_NO_BROWSER) {
-        Start-Process -FilePath $ErrorPage
+    Write-Host ''
+    Write-Host "  [FAILED] $Message" -ForegroundColor Red
+    Write-Host "  Install log: $InstallLog"
+    if (Test-Path -LiteralPath $ServerOutLog) { Write-Host "  Server log:  $ServerOutLog" }
+    if (Test-Path -LiteralPath $ServerErrorLog) { Write-Host "  Error log:   $ServerErrorLog" }
+    Write-Host ''
+}
+
+function Install-OptionalPackages {
+    if (-not (Test-Path -LiteralPath $OptionalRequirements)) { return }
+    if (Test-Path -LiteralPath $OptionalMarker) { return }
+    Invoke-Native { & $PythonExe -c 'import pilk' 2>$null }
+    if ($RuntimeExitCode -eq 0) { return }
+    Write-Host '  - Installing optional voice codec...'
+    Invoke-Native { & $PythonExe -m pip install --disable-pip-version-check --only-binary=:all: -r $OptionalRequirements *>> $InstallLog }
+    if ($RuntimeExitCode -ne 0) {
+        [IO.File]::WriteAllText($OptionalMarker, 'optional packages unavailable')
+        Write-Host '  - Optional voice codec skipped: voice messages stay as .silk files.'
     }
 }
 
@@ -70,36 +86,40 @@ function Stop-PortListener([int]$Port) {
         if (-not (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)) { break }
     }
     if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
-        throw '旧服务未能停止，请手动结束占用 8756 端口的进程后重试。'
+        throw "Port $Port is still in use. Close the process that occupies it and run run.bat again."
     }
 }
 
 try {
     [IO.Directory]::CreateDirectory($RuntimeDir) | Out-Null
+    Write-Host '  - Checking runtime...'
+    Remove-DuplicateEnvVars
     Stop-PortListener 8756
     $ConfigPath = Join-Path $ProjectDir 'config\config.json'
     if (-not (Test-Path -LiteralPath $ConfigPath)) {
         Copy-Item -LiteralPath (Join-Path $ProjectDir 'config\config.example.json') -Destination $ConfigPath
     }
     if (-not (Test-Path -LiteralPath $PythonExe)) {
+        Write-Host '  - First run: preparing Python environment...'
         $PythonLauncher = Get-Command py -ErrorAction SilentlyContinue
         if ($PythonLauncher) {
             Invoke-Native { & $PythonLauncher.Source -3 -m venv $VenvDir *> $InstallLog }
         } else {
             $PythonLauncher = Get-Command python -ErrorAction SilentlyContinue
-            if (-not $PythonLauncher) { throw '未找到 Python，请安装 Python 3.10 或更新版本。' }
+            if (-not $PythonLauncher) { throw 'Python not found. Install Python 3.10+ and enable "Add to PATH", then run run.bat again.' }
             Invoke-Native { & $PythonLauncher.Source -m venv $VenvDir *> $InstallLog }
         }
         if ($RuntimeExitCode -ne 0 -or -not (Test-Path -LiteralPath $PythonExe)) {
-            throw '无法创建运行环境，请查看安装记录。'
+            throw 'Could not create the Python environment. Check runtime\install.log.'
         }
     }
     $Fingerprint = Invoke-Native { & $PythonExe -c 'import hashlib, sys; from pathlib import Path; print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest().upper() + chr(58) + sys.version)' $Requirements 2>> $InstallLog }
-    if ($RuntimeExitCode -ne 0) { throw 'Python 运行环境损坏，请查看安装记录。' }
+    if ($RuntimeExitCode -ne 0) { throw 'The Python environment is broken. Delete the runtime folder and run run.bat again.' }
     $SavedFingerprint = if (Test-Path -LiteralPath $DependencyStamp) { Get-Content -LiteralPath $DependencyStamp -Raw } else { '' }
     if ($SavedFingerprint.Trim() -ne $Fingerprint) {
+        Write-Host '  - Installing dependencies (1-3 minutes, keep this window open)...'
         Invoke-Native { & $PythonExe -m ensurepip --upgrade *> $InstallLog }
-        if ($RuntimeExitCode -ne 0) { throw '无法准备依赖安装工具。' }
+        if ($RuntimeExitCode -ne 0) { throw 'Could not prepare pip. Check runtime\install.log.' }
         $PipArgs = @('-m', 'pip', 'install', '--disable-pip-version-check', '-r', $Requirements)
         $WheelsDir = Join-Path $ProjectDir 'wheels'
         if (Test-Path -LiteralPath $WheelsDir) {
@@ -108,11 +128,13 @@ try {
         } else {
             Invoke-Native { & $PythonExe @PipArgs *>> $InstallLog }
         }
-        if ($RuntimeExitCode -ne 0) { throw '依赖安装失败，请检查网络并查看安装记录。' }
+        if ($RuntimeExitCode -ne 0) { throw 'Dependency install failed. Check your network, then run run.bat again (see runtime\install.log).' }
         Invoke-Native { & $PythonExe -m pip check *>> $InstallLog }
-        if ($RuntimeExitCode -ne 0) { throw '依赖检查失败，请查看安装记录。' }
+        if ($RuntimeExitCode -ne 0) { throw 'Dependency check failed. Check runtime\install.log.' }
         [IO.File]::WriteAllText($DependencyStamp, $Fingerprint)
     }
+    Install-OptionalPackages
+    Write-Host '  - Starting local service...'
     $ServerProc = Start-Process -FilePath $PythonExe -ArgumentList (Join-Path $PSScriptRoot 'server.py') `
         -WorkingDirectory $ProjectDir -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput $ServerOutLog -RedirectStandardError $ServerErrorLog
@@ -123,9 +145,15 @@ try {
         Start-Sleep -Milliseconds 500
     }
     if (-not $Up) {
-        throw '本地服务启动失败，请查看运行记录。'
+        throw 'The local service did not start. Check runtime\server.stderr.log.'
     }
-    Write-Host 'Open in browser: http://127.0.0.1:8756/'
+    Write-Host ''
+    Write-Host '  Ready: http://127.0.0.1:8756/' -ForegroundColor Green
+    Write-Host '  The service keeps running in the background after this window closes.'
+    if (-not $env:WXMOMENTS_NO_BROWSER) {
+        $Stamp = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        try { Start-Process "http://127.0.0.1:8756/?t=$Stamp" } catch { }
+    }
     exit 0
 } catch {
     Show-StartupError $_.Exception.Message @($InstallLog, $ServerOutLog, $ServerErrorLog)

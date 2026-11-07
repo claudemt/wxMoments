@@ -206,7 +206,6 @@ def is_ok(passphrase, buf, internal_db_key=None):
 
 
 def check_chunk(chunk, buf, internal_db_key=None):
-    global finish_flag
     if finish_flag:
         return False
     if is_ok(chunk, buf, internal_db_key):
@@ -252,7 +251,7 @@ def get_key_inner(pid, process_infos):
                 if rule_name == 'GetKeyAddrStub':
                     for string in match.strings:
                         for instance in string.instances:
-                            offset, content = instance.offset, instance.matched_data
+                            offset = instance.offset
                             addr = read_num(memory, offset, 8)
                             pre_addresses.append(addr)
 
@@ -274,7 +273,6 @@ def get_key(pid, process_handle, buf, internal_db_key=None):
         k, m = divmod(len(lst), n)
         return (lst[i * k + min(i, m):(i + 1) * k + min(i + 1, m)] for i in range(n))
 
-    keys = []
     pool = multiprocessing.Pool(processes=multiprocessing.cpu_count() // 2)
     results = pool.starmap(get_key_inner, ((pid, process_info_) for process_info_ in
                                            split_list(process_infos, min(len(process_infos), _MAX_PROCESS_SPLITS))))

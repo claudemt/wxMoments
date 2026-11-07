@@ -53,6 +53,8 @@ async def lifespan(app):
 
 app = FastAPI(title="微信数据导出工具", lifespan=lifespan)
 
+WEB_BUILD = "2026-11-07.7"
+
 
 _ARTICLE_CACHE: dict[str, wechat.Article] = {}
 
@@ -65,7 +67,10 @@ async def browser_errors(request, call_next):
         logger.exception("请求失败：%s %s", request.method, request.url.path)
         return JSONResponse({"ok": False, "msg": f"操作失败：{exc}"}, status_code=500)
     path = request.url.path
-    if path == "/" or path.startswith("/static/"):
+    if path == "/":
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+    elif path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
     return response
 
@@ -73,6 +78,11 @@ async def browser_errors(request, call_next):
 @app.get("/api/diagnostics")
 async def api_diagnostics(after: int = 0):
     return diagnostics(after)
+
+
+@app.get("/api/version")
+async def api_version():
+    return {"ok": True, "build": WEB_BUILD}
 
 
 @app.get("/api/logs")
@@ -103,7 +113,10 @@ async def api_logs_open():
 
 @app.get("/")
 async def index():
-    return FileResponse(WEB_DIR / "index.html")
+    return FileResponse(
+        WEB_DIR / "index.html",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
+    )
 
 
 app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
@@ -111,12 +124,10 @@ app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
 @app.post("/api/reveal")
 async def api_reveal(payload: dict):
-    """在资源管理器里打开导出目录；只允许 output 下的路径。"""
     root = OUTPUT_DIR.resolve()
     raw = str((payload or {}).get("path") or "").strip()
     path = Path(raw) if raw else root
     if not path.is_absolute():
-        # 兼容前端传 "output/xxx" 这种相对项目根的写法
         candidate = root / path
         if not candidate.exists() and (BASE_DIR / path).exists():
             candidate = BASE_DIR / path
@@ -1253,7 +1264,7 @@ def _chatlist_cell(item: dict[str, Any], column: str) -> str:
         if value:
             return str(value)
         if "room_id" in item:
-            return ""      # 群备注多为空，留白比重复群名更清楚
+            return ""
         return str(item.get("nickname") or item.get("wxid") or "")
     if column == "region":
         return " ".join(x for x in (item.get("country"), item.get("province"),

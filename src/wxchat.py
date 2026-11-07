@@ -20,7 +20,6 @@ import wxmoments
 from wechat_decrypt_tool.modules.chat_media import ChatMedia, human_size, safe_filename
 from wechat_decrypt_tool.modules.chat_reader import (
     KIND_LABELS,
-    ChatSchemaError,
     ChatStore,
 )
 from wechat_decrypt_tool.modules.logging_config import get_logger
@@ -33,14 +32,13 @@ CHAT_RUNTIME_DIR = PROJECT_ROOT / "runtime" / "chat"
 STICKER_CACHE_DIR = PROJECT_ROOT / "runtime" / "cache" / "stickers"
 MAX_EXPORT_SESSIONS = 100
 MAX_EXPORT_MESSAGES = 200000
-MAX_MEDIA_TOTAL_BYTES = 2 * 1024 ** 3      # 单次导出媒体总量上限
-MAX_MEDIA_FILE_BYTES = 300 * 1024 ** 2     # 单个文件上限
-MAX_IMAGE_FULL_BYTES = 4 * 1024 ** 2       # 超过则只保留缩略图
-MAX_ARTICLE_COUNT = 200                    # 单次导出最多保存多少篇公众号文章
-ARTICLE_TIME_BUDGET = 120.0                # 抓取文章正文的总时间预算（秒，整次导出共享）
-LINK_THUMB_BUDGET = 60.0                   # 下载链接封面图的总时间预算（秒）
+MAX_MEDIA_TOTAL_BYTES = 2 * 1024 ** 3
+MAX_MEDIA_FILE_BYTES = 300 * 1024 ** 2
+MAX_IMAGE_FULL_BYTES = 4 * 1024 ** 2
+MAX_ARTICLE_COUNT = 200
+ARTICLE_TIME_BUDGET = 120.0
+LINK_THUMB_BUDGET = 60.0
 
-# 导出筛选用的内容类型。与预览里的类型一一对应，另加「其他」「系统消息」兜底。
 EXPORT_KIND_OPTIONS = [
     ("text", "文字"), ("image", "图片"), ("voice", "语音"), ("video", "视频"),
     ("file", "文件"), ("link", "链接"), ("quote", "引用"), ("forward", "合并转发"),
@@ -265,7 +263,6 @@ def status() -> dict[str, Any]:
         "account": state["account"]["account"],
         "snapshot_id": state["snapshot_id"],
         "sessions": len(state["sessions"]),
-        # 折叠群默认隐藏，概览数字要跟列表一致
         "visible_sessions": sum(1 for item in state["sessions"] if not item.get("folded")),
         "shards": state["shard_count"],
         "created_at": state["created_at"],
@@ -309,7 +306,6 @@ def _sessions_index() -> dict[str, dict[str, Any]]:
 
 
 def _kind_bucket(kind: str | None) -> str:
-    """把细分的消息类型收敛到导出筛选的桶里。"""
     return _KIND_BUCKET.get((kind or "").strip(), "other")
 
 
@@ -328,7 +324,6 @@ def _parse_range(filters: dict[str, Any]) -> dict[str, Any]:
     raw_kinds = filters.get("kinds")
     if isinstance(raw_kinds, (list, tuple, set)):
         picked = {str(item).strip() for item in raw_kinds} & KIND_BUCKETS
-        # 全选等于不筛选；一个都没有则视为「没有内容可导出」，用空集合表示
         if picked and picked != KIND_BUCKETS:
             kinds = picked
         elif not picked:
@@ -361,7 +356,6 @@ def sessions(payload: dict) -> dict[str, Any]:
     page_size = max(1, min(int(payload.get("page_size") or 50), 5000))
     window = _parse_range(payload)
     has_range = window["start"] is not None or window["end"] is not None
-    # 折叠群聊默认不出现：多数只用来免打扰，导出价值低
     show_folded = bool(payload.get("show_folded"))
     store = _store() if has_range else None
     rows: list[dict[str, Any]] = []
@@ -434,7 +428,6 @@ def _media_store() -> "ChatMedia":
 
 
 def media_blob(payload: dict) -> tuple[bytes, str]:
-    """预览用：按种类返回图片原图 / 语音 / 文件的原始字节。"""
     media = _media_store()
     kind = str(payload.get("kind") or "image_full").strip()
     session = str(payload.get("session") or "").strip()
@@ -532,13 +525,11 @@ PLACEHOLDERS = {
 }
 
 
-# 这些类型的 Markdown 正文只是占位符，媒体内容已由 _media_markdown 输出
 _BODY_SKIP = frozenset({"image", "voice", "video", "file", "link",
                         "miniprogram", "channel", "sticker"})
 
 
 def _message_body(message: dict[str, Any]) -> str:
-    """纯文本正文，用于 Markdown 与搜索。"""
     kind = message.get("kind") or "other"
     text = message.get("text") or ""
     extra = message.get("extra") or {}
@@ -877,7 +868,6 @@ def _file_ext_class(ext: str) -> str:
 
 
 def _link_display(title: str, url: str) -> tuple[str, str]:
-    """链接标题常常就是一串 URL，转成「域名/路径」并回报原始地址。"""
     raw = (title or "").strip()
     source = raw or (url or "").strip()
     if raw and not re.match(r"^https?://", raw, re.I):
@@ -906,7 +896,6 @@ def _media_html(item: dict[str, Any]) -> str:
         full = media.get("image") or thumb
         if not full:
             return '<div class="mark">图片未缓存到本机</div>'
-        # 直接内嵌原图，导出后的 HTML 不点开也是清晰的
         return (f'<div class="att"><img loading="lazy" src="{_html_escape(full)}" '
                 f'data-full="{_html_escape(full)}" alt="图片"></div>')
     if kind == "video":
@@ -987,7 +976,6 @@ def _media_html(item: dict[str, Any]) -> str:
 
 
 def _voice_html(item: dict[str, Any]) -> str:
-    """微信式语音条：波形 + 秒数，点击整条播放。"""
     media = item.get("media") or {}
     extra = item.get("extra") or {}
     try:
@@ -1237,7 +1225,6 @@ def _write_markdown(path: Path, session: dict[str, Any], items: list[dict[str, A
             who = item.get("sender_display") or ""
             fp.write(f"**{_fmt_time(item.get('create_time') or 0)} · {who}**\n\n")
             media_text = _media_markdown(item)
-            # 媒体类消息的正文就是占位符（[图片] / [链接] 标题），有实体内容时不再重复
             body = "" if media_text and (item.get("kind") in _BODY_SKIP) \
                 else _message_body(item).rstrip()
             if body:
@@ -1247,13 +1234,11 @@ def _write_markdown(path: Path, session: dict[str, Any], items: list[dict[str, A
 
 
 def _article_index(output_root: Path) -> dict[str, str]:
-    """已经导出过的公众号文章：标题 -> 绝对路径。"""
     by_title: dict[str, str] = {}
     try:
         for folder in output_root.iterdir():
             if not folder.is_dir():
                 continue
-            # 聊天记录导出目录里也有会话 html，不能被当成公众号文章索引
             if folder.name == "databases" or folder.name.startswith("聊天记录"):
                 continue
             pages = list(folder.glob("*.html"))
@@ -1317,7 +1302,6 @@ h1{font-size:23px;line-height:1.42;margin:0 0 10px;letter-spacing:-.2px}
 
 def _write_article_snapshot(folder: Path, title: str, source: str, descr: str, url: str,
                             cover: Path | None, exported_at: str) -> Path:
-    """离线快照页：正文抓不到时，至少把标题 / 摘要 / 封面 / 原文链接留在本地。"""
     folder.mkdir(parents=True, exist_ok=True)
     cover_html = ""
     if cover is not None and cover.exists():
@@ -1364,7 +1348,6 @@ def _write_article_snapshot(folder: Path, title: str, source: str, descr: str, u
 
 
 def _copy_existing_article(src_page: Path, dest_folder: Path) -> Path:
-    """把之前用「公众号导出」保存过的文章整目录复制进来，离线可看。"""
     dest_folder.mkdir(parents=True, exist_ok=True)
     shutil.copytree(src_page.parent, dest_folder, dirs_exist_ok=True)
     return dest_folder / src_page.name
@@ -1375,10 +1358,9 @@ def _fetch_article(url: str):
         from wechat_download import wechat
 
         art = wechat.parse_article(wechat.fetch_html(url, timeout=12), url)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.info("抓取文章失败 %s: %s", url[:80], exc)
         return None
-    # 微信风控返回的是「环境异常 / 请在微信客户端打开」，正文为空
     if not (art.content_html or "").strip() or not art.title:
         return None
     return art
@@ -1401,11 +1383,6 @@ def _export_articles(items: list[dict[str, Any]], out_dir: Path,
                      on_step: Callable[[int, int], None] | None = None,
                      cache: dict[str, str] | None = None,
                      budget: dict[str, float] | None = None) -> dict[str, int]:
-    """把消息里的公众号文章落成本地 html + md，并回填相对路径。
-
-    优先复用「公众号导出」里已经保存过的同名文章；否则尝试联网抓正文；
-    微信风控挡住时退化为离线快照（标题 / 摘要 / 封面 / 原文链接）。
-    """
     stats = {"saved": 0, "snapshot": 0, "reused": 0, "missing": 0}
     grouped: list[tuple[str, list[dict[str, Any]], str]] = []
     seen: dict[str, int] = {}
@@ -1469,7 +1446,7 @@ def _export_articles(items: list[dict[str, Any]], out_dir: Path,
                     used_slugs.add(result.article_dir.name.casefold())
                     stats["saved"] += 1
                     network_failures = 0
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     logger.warning("保存文章失败 %s: %s", url[:80], exc)
             else:
                 network_failures += 1
@@ -1516,10 +1493,6 @@ _STICKER_DB_MISS: set[str] = set()
 
 
 def _sticker_from_db(md5: str) -> bytes:
-    """老表情消息里可能没有 cdnurl，按 md5 翻消息库找同款表情的可用地址。
-
-    只在直接取图失败时调用，命中后写进表情缓存，后续导出不再翻库。
-    """
     key = re.sub(r"[^0-9a-f]", "", (md5 or "").lower())[:32]
     if not key or key in _STICKER_DB_MISS:
         return b""
@@ -1533,7 +1506,7 @@ def _sticker_from_db(md5: str) -> bytes:
             _STICKER_DB_MISS.add(key)
             return b""
         data, _mime = media_decrypt._try_fetch_emoticon_from_sources(urls, keys)
-    except Exception as exc:  # pragma: no cover - 翻库失败不该影响导出
+    except Exception as exc:
         logger.debug("表情远程源查询失败 %s: %s", key, exc)
         _STICKER_DB_MISS.add(key)
         return b""
@@ -1544,12 +1517,6 @@ def _sticker_from_db(md5: str) -> bytes:
 
 
 def _sticker_bytes(md5: str, cdn: str, thumb: str = "") -> tuple[bytes, str]:
-    """表情图：先查本地缓存，再按消息里的 CDN 地址取原图（失败退回缩略图）。
-
-    微信把收到的表情以加密副本存在 business/emoticon 下，密钥没有公开，
-    但消息 XML 自带可直连的 cdnurl / thumburl，取回来是完整可用的图片。
-    老表情消息里可能没有地址，这时按 md5 去消息库里找同款的其他消息。
-    """
     key = re.sub(r"[^0-9a-f]", "", (md5 or "").lower())[:32]
     if not key:
         key = str(abs(hash((cdn or thumb or "")[:200])))[:16]
@@ -1576,7 +1543,6 @@ def _sticker_bytes(md5: str, cdn: str, thumb: str = "") -> tuple[bytes, str]:
         except OSError:
             pass
         return data, mime
-    # 消息里没有 CDN 地址时（老表情），按 md5 去消息库找同款表情的可用地址
     if key and len(key) == 32:
         data = _sticker_from_db(key)
         if data:
@@ -1591,7 +1557,6 @@ def _sticker_bytes(md5: str, cdn: str, thumb: str = "") -> tuple[bytes, str]:
 
 
 def _fetch_remote_image(url: str, timeout: float = 8.0) -> bytes:
-    """下载链接封面图；失败就返回空，导出不因此中断。"""
     link = (url or "").strip()
     if not link.startswith(("http://", "https://")):
         return b""
@@ -1608,7 +1573,7 @@ def _fetch_remote_image(url: str, timeout: float = 8.0) -> bytes:
         })
         resp.raise_for_status()
         data = resp.content
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.info("封面下载失败 %s: %s", link[:80], exc)
         return b""
     if not data or len(data) > 8 * 1024 ** 2:
@@ -1623,7 +1588,6 @@ def _collect_media(media: ChatMedia, session_id: str, items: list[dict[str, Any]
                    base_dir: Path, session_slug: str, job,
                    budget: dict[str, int] | None = None,
                    on_step: Callable[[int, int], None] | None = None) -> dict[str, int]:
-    """把图片 / 文件 / 语音 / 视频 / 卡片封面落到导出目录，并回填相对路径。"""
     stats = {"images": 0, "files": 0, "voices": 0, "videos": 0, "links": 0,
              "stickers": 0, "missing": 0, "skipped": 0}
     budget = budget if budget is not None else {"left": MAX_MEDIA_TOTAL_BYTES}
@@ -1778,7 +1742,6 @@ _PDF_FONT_CACHE: tuple[str, str] | None = None
 
 
 def _pdf_fonts() -> tuple[str, str]:
-    """优先用系统雅黑（ASCII 与中文宽度一致），退化到黑体 / STSong。"""
     global _PDF_FONT_CACHE
     if _PDF_FONT_CACHE:
         return _PDF_FONT_CACHE
@@ -1811,7 +1774,6 @@ def _pdf_fonts() -> tuple[str, str]:
 
 
 def _pdf_safe(value: str) -> str:
-    """reportlab 的中文字库不含表情，画之前先剔除，避免出现方块或怪字符。"""
     return _PDF_EMOJI.sub("", str(value or ""))
 
 
@@ -1837,7 +1799,6 @@ def _pdf_wrap(text: str, font: str, size: float, width: float) -> list[str]:
 
 
 def _pdf_thumb(item: dict[str, Any], base_dir: Path, limit: float = 54.0):
-    """卡片右侧的小方图（链接封面等），取不到就返回 None。"""
     rel = (item.get("media") or {}).get("thumb")
     if not rel:
         return None
@@ -1882,14 +1843,12 @@ def _pdf_image(item: dict[str, Any], base_dir: Path):
 def _session_pdf(session: dict[str, Any], items: list[dict[str, Any]],
                  pdf_path: Path, base_dir: Path, exported_at: str,
                  account: str = "") -> bool:
-    """用 reportlab 直接排版会话 PDF，不依赖浏览器进程。"""
     try:
         from reportlab.lib.colors import HexColor
         from reportlab.lib.pagesizes import A4
         from reportlab.pdfbase import pdfmetrics
-        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
         from reportlab.pdfgen import canvas
-    except Exception as exc:  # pragma: no cover - 环境缺依赖
+    except Exception as exc:
         logger.warning("PDF 依赖不可用：%s", exc)
         return False
 
@@ -1924,7 +1883,7 @@ def _session_pdf(session: dict[str, Any], items: list[dict[str, Any]],
 
     try:
         pdf = canvas.Canvas(str(pdf_path), pagesize=A4)
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:
         logger.warning("创建 PDF 失败：%s", exc)
         return False
     pdf.setTitle(f"{session['display']} - 聊天记录")
@@ -1951,7 +1910,6 @@ def _session_pdf(session: dict[str, Any], items: list[dict[str, Any]],
         if state["y"] - height < margin_bottom:
             new_page()
 
-    # 首屏标题
     pdf.setFillColor(HexColor("#07c160"))
     pdf.roundRect(margin_x, state["y"] - 3, 24, 3, 1.5, stroke=0, fill=1)
     state["y"] -= 12
@@ -2004,7 +1962,6 @@ def _session_pdf(session: dict[str, Any], items: list[dict[str, Any]],
         return (page_w - margin_x - 40 - width) if mine else margin_x + 40
 
     def clip_line(text: str, font_name: str, size: float, width: float) -> str:
-        """把过长的单行文本裁到指定宽度，末尾补省略号。"""
         if pdfmetrics.stringWidth(text, font_name, size) <= width:
             return text
         cut = text
@@ -2092,7 +2049,6 @@ def _session_pdf(session: dict[str, Any], items: list[dict[str, Any]],
             state["y"] = card_y - 8
             continue
 
-        # 链接 / 小程序 / 视频号 / 音乐 / 直播：带封面的卡片
         if kind in ("link", "miniprogram", "channel", "music", "live"):
             badge = {"link": ("公众号" if extra.get("official") else "链接"),
                      "miniprogram": "小程序", "channel": "视频号",
@@ -2105,7 +2061,6 @@ def _session_pdf(session: dict[str, Any], items: list[dict[str, Any]],
             thumb_w = (thumb[1] + 10) if thumb else 0.0
             inner = card_w - 20 - thumb_w
             title_lines = _pdf_wrap(title, font, 10, inner)[:2]
-            # 公众号消息的描述常常就是标题本身，重复一遍反而更乱
             show_descr = bool(descr) and descr.strip() != title.strip()
             descr_line = clip_line(descr, font, 8.5, inner) if show_descr else ""
             card_h = 12 + len(title_lines) * 14 + (12 if descr_line else 0) + 14
@@ -2149,7 +2104,6 @@ def _session_pdf(session: dict[str, Any], items: list[dict[str, Any]],
             state["y"] = card_y - 8
             continue
 
-        # 视频：封面 + 播放键；没有封面就退成 chip，别画一个空播放框
         if kind == "video":
             image = _pdf_image(item, base_dir)
             caption = _pdf_safe(item.get("text") or "")
@@ -2201,7 +2155,6 @@ def _session_pdf(session: dict[str, Any], items: list[dict[str, Any]],
                 state["y"] = bubble_y - 8
                 continue
 
-        # 语音：波形条 + 秒数（和导出 HTML 保持一致）
         if kind == "voice":
             try:
                 secs = int(float(extra.get("duration") or 0))
@@ -2220,7 +2173,6 @@ def _session_pdf(session: dict[str, Any], items: list[dict[str, Any]],
             pdf.setLineWidth(0.6)
             pdf.roundRect(bar_x, bar_y, bar_w, bar_h, 5,
                           stroke=0 if mine else 1, fill=1)
-            # 8 根竖条：高度按序号小幅起伏，只是为了有波形的手感
             peaks = [7, 12, 9, 15, 11, 6, 13, 8]
             wave_x = bar_x + 10
             pdf.setFillColor(HexColor("#3f7a4f" if mine else "#7c848d"))
@@ -2235,12 +2187,10 @@ def _session_pdf(session: dict[str, Any], items: list[dict[str, Any]],
             state["y"] = bar_y - 8
             continue
 
-        # 合并转发：卡片 + 前几条摘要
         if kind == "forward":
             title = _pdf_safe(item.get("title") or "转发的聊天记录")
             rows = extra.get("forward_items") or []
             card_w = min(bubble_max, 300.0)
-            # 有些转发的子项只有类型没有正文，别为它们留空行
             filled = [entry for entry in rows
                       if str(entry.get("name") or "").strip()
                       or str(entry.get("title") or "").strip()]
@@ -2285,7 +2235,6 @@ def _session_pdf(session: dict[str, Any], items: list[dict[str, Any]],
             state["y"] = card_y - 8
             continue
 
-        # 名片 / 位置 / 红包 / 转账 / 通话 / 笔记 / 接龙 / 群公告：单行 chip
         chips = {
             "video": ("视频", item.get("text") or "视频未缓存到本机"),
             "card": ("名片", extra.get("nickname") or item.get("text") or ""),
@@ -2333,14 +2282,12 @@ def _session_pdf(session: dict[str, Any], items: list[dict[str, Any]],
         quote = extra.get("quote") if kind == "quote" else None
         raw_body = _message_body(item)
         if quote:
-            # 引用块单独画，正文只保留回复本身，避免和引用内容重复
             raw_body = item.get("text") or ""
         body = _pdf_safe(raw_body)
         image = _pdf_image(item, base_dir)
         if image:
-            body = ""      # 图片消息不再叠一行「[图片]」
+            body = ""
         if not body.strip() and not image:
-            # 整条消息只有表情时，剔掉表情字后要留个占位，避免出现空气泡
             if kind == "sticker":
                 body = "[动画表情]"
             else:
@@ -2381,7 +2328,6 @@ def _session_pdf(session: dict[str, Any], items: list[dict[str, Any]],
 
         bubble_x = side_x(bubble_w, mine)
         bubble_y = top - meta_h - bubble_h
-        # 表情按微信习惯画成无气泡的裸图
         bare = bool(image) and (kind == "sticker")
         if not bare:
             pdf.setFillColor(mine_bubble if mine else other_bubble)
@@ -2391,7 +2337,6 @@ def _session_pdf(session: dict[str, Any], items: list[dict[str, Any]],
                 pdf.setStrokeColor(line_color)
                 pdf.setLineWidth(0.6)
                 pdf.roundRect(bubble_x, bubble_y, bubble_w, bubble_h, 5, stroke=1, fill=1)
-            # 气泡尖角
             tip_y = bubble_y + bubble_h - 14
             path = pdf.beginPath()
             if mine:
@@ -2408,7 +2353,6 @@ def _session_pdf(session: dict[str, Any], items: list[dict[str, Any]],
                 path.lineTo(bubble_x, tip_y - 5)
                 path.lineTo(bubble_x, tip_y + 5)
                 pdf.drawPath(path, stroke=1, fill=1)
-        # 引用块：灰底 + 左侧绿条
         text_top = bubble_y + bubble_h - pad
         if quote_h:
             quote_x = bubble_x + pad
@@ -2442,7 +2386,7 @@ def _session_pdf(session: dict[str, Any], items: list[dict[str, Any]],
     footer()
     try:
         pdf.save()
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:
         logger.warning("写入 PDF 失败：%s", exc)
         with suppress(OSError):
             pdf_path.unlink()
@@ -2471,7 +2415,6 @@ def _run_export(job, picked: list[dict[str, Any]], window: dict[str, Any],
     media_budget = {"left": MAX_MEDIA_TOTAL_BYTES}
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
-        total_sessions = len(picked)
         for index, session in enumerate(picked, start=1):
             job.check_canceled()
             base = index - 1

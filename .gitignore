@@ -1,13 +1,39 @@
+# Python 运行产物
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 虚拟环境与本地依赖缓存（启动脚本装在 runtime/.venv 下）
+.venv/
+venv/
+env/
+wheels/
+
+# 运行期生成：日志、依赖戳记、导出结果
 runtime/
 src/runtime/
 output/
+*.log
+startup-error.html
+
+# 本机配置（含微信数据路径等隐私信息）
 config/config.json
+
+# 编辑器与系统文件
+.vscode/
+.idea/
 .DS_Store
 Thumbs.db
-*.log
+*.orig
+*~
+*.swp
+
+# 压缩包与备份（发布包走 GitHub Release）
+*.zip
+*.7z
+*.bak
 
 # 第三方参考工程与需求文档（含 GPL 代码，不入库）
 reference/

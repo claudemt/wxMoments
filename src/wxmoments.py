@@ -8,7 +8,6 @@ import os
 import re
 import shutil
 import sqlite3
-import sys
 from io import BytesIO
 from dataclasses import dataclass
 from datetime import datetime, time
@@ -116,13 +115,6 @@ def save_groups(path: Path, data: dict[str, Any]) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(payload, encoding="utf-8")
     os.replace(tmp, path)
-
-
-def ensure_imports() -> None:
-    if (SRC_ROOT / "wechat_decrypt_tool").exists():
-        sys.path.insert(0, str(SRC_ROOT))
-        return
-    raise FileNotFoundError("缺少 src/wechat_decrypt_tool，请确认项目文件完整")
 
 
 def parse_datetime(value: str, *, end_of_day: bool) -> datetime | None:
@@ -345,21 +337,6 @@ def find_account(config: dict[str, Any]) -> AccountInfo:
             r"C:\Users\你的用户名\Documents\WeChat Files 或 D:\微信文件。"
         )
     return max(candidates, key=lambda item: item[0])[1]
-
-
-def is_wechat_running() -> bool:
-    try:
-        import psutil
-    except Exception:
-        return False
-    targets = {"weixin.exe", "wechat.exe"}
-    for proc in psutil.process_iter(["name"]):
-        try:
-            if str(proc.info.get("name") or "").strip().lower() in targets:
-                return True
-        except Exception:
-            continue
-    return False
 
 
 def load_saved_db_key(account_info: AccountInfo) -> str:
@@ -827,10 +804,6 @@ def self_username_candidates(account_info: AccountInfo, config: dict[str, Any]) 
     return out
 
 
-def normalize_contact_lookup_text(value: str) -> str:
-    return re.sub(r"\s+", " ", str(value or "").replace("\xa0", " ")).strip().casefold()
-
-
 def decode_contact_text(value: Any) -> str:
     if value is None:
         return ""
@@ -1062,14 +1035,12 @@ def parse_contact_extra_buffer(blob: Any) -> dict[str, str]:
     return out
 
 
-# contact.flag 的位含义（微信 4.x），与 chat_reader 中的定义保持一致。
 CONTACT_FLAG_MUTED = 1 << 9
 CONTACT_FLAG_PINNED = 1 << 11
 CONTACT_FLAG_FOLDED = 1 << 28
 
 
 def contact_flag_states(flag: int) -> dict[str, bool]:
-    """把 contact.flag 拆成置顶 / 折叠 / 免打扰三个布尔值。"""
     return {
         "pinned": bool(flag & CONTACT_FLAG_PINNED),
         "folded": bool(flag & CONTACT_FLAG_FOLDED),
@@ -1086,11 +1057,6 @@ def _member_name(row: sqlite3.Row, self_usernames: set[str]) -> str:
 
 
 def load_group_details(account_dir: Path) -> list[dict[str, Any]]:
-    """读取全部群聊：备注、置顶/折叠、群主、成员、公告。
-
-    群成员来自 chatroom_member → contact；群主与公告分别取自 chat_room
-    与 chat_room_info_detail。缺失的表一律降级为空，不影响其余字段。
-    """
     contact_db = account_dir / "contact.db"
     if not contact_db.exists():
         return []
@@ -1146,7 +1112,6 @@ def load_group_details(account_dir: Path) -> list[dict[str, Any]]:
             remark = decode_contact_text(row_value(row, "remark"))
             member_names = sorted(members.get(gid) or [], key=str.casefold)
             if not name and not remark:
-                # 未命名群：微信侧栏用前几位成员名拼接，这里照做
                 name = "、".join(member_names[:3])
                 if len(member_names) > 3:
                     name += "…"
@@ -1178,7 +1143,7 @@ def load_contact_details(account_dir: Path) -> list[dict[str, Any]]:
     self_usernames = {clean_account_name(account_dir.name), account_dir.name}
     conn = sqlite3.connect(str(contact_db))
     conn.row_factory = sqlite3.Row
-    
+
     group_count: dict[str, int] = {}
     try:
         for row in conn.execute(
@@ -1232,16 +1197,6 @@ def load_contact_details(account_dir: Path) -> list[dict[str, Any]]:
         details,
         key=lambda k: (not details[k]["pinned"],
                        (details[k]["remark"] or details[k]["nickname"] or k).casefold()))]
-
-
-def build_contact_lookup(contacts: list[ContactEntry]) -> dict[str, list[ContactEntry]]:
-    lookup: dict[str, list[ContactEntry]] = {}
-    for contact in contacts:
-        for value in (contact.remark, contact.nickname):
-            key = normalize_contact_lookup_text(value)
-            if key:
-                lookup.setdefault(key, []).append(contact)
-    return lookup
 
 
 def build_contact_display_names(contacts: list[ContactEntry]) -> dict[str, str]:
@@ -1395,10 +1350,8 @@ async def fetch_remote_image(account_dir: Path, media: dict[str, Any], prefer_th
     raw_url, key, token, is_original = sns_image_source(media, prefer_thumb=prefer_thumb)
     if not raw_url:
         return b"", "", ""
-    
-    
-    
-    
+
+
     keep_source_size = not is_original
     expected = expected_image_size(media) if is_original else (0, 0)
     cached = get_cached_sns_remote_image(
@@ -1558,8 +1511,7 @@ def describe_empty_export(
         )
         return "\n".join(lines)
 
-    
-    
+
     person_posts: list[dict[str, Any]] | None = None
     if usernames:
         try:
@@ -2135,7 +2087,6 @@ def render_pdf_chromium(html_path: Path, pdf_path: Path) -> None:
             f"--print-to-pdf={pdf_path.resolve()}",
             html_path.resolve().as_uri(),
         ]
-        # 不用管道读取输出：浏览器子进程可能持有句柄导致 communicate() 一直不返回
         proc = subprocess.Popen(command, stdout=log, stderr=log, stdin=subprocess.DEVNULL)
         import time as _time
 
@@ -2155,7 +2106,6 @@ def render_pdf_chromium(html_path: Path, pdf_path: Path) -> None:
                 else:
                     stable = 0
                     last_size = size
-                # 文件大小连续 2s 不变即视为打印完成，无需等待浏览器进程退出
                 if stable >= 5:
                     with contextlib.suppress(Exception):
                         proc.kill()

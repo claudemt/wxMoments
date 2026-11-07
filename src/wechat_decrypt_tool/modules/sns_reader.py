@@ -1,7 +1,6 @@
 from bisect import bisect_left, bisect_right
 from functools import lru_cache
 from pathlib import Path
-import os
 import base64
 import hashlib
 import json
@@ -20,7 +19,7 @@ from .media_cache import _resolve_account_wxid_dir
 from ..exceptions import WxMomentsError
 
 from .constants import (
-    MEDIA_TYPE_IMAGE, MEDIA_TYPE_VIDEO,
+    MEDIA_TYPE_IMAGE,
     POST_TYPE_NORMAL, POST_TYPE_ARTICLE, POST_TYPE_LINK, POST_TYPE_COVER,
     POST_TYPE_FINDER, POST_TYPE_MUSIC,
     DEFAULT_PAGE_LIMIT,
@@ -32,7 +31,6 @@ from .wcdb_realtime import (
     WCDBRealtimeError,
     WCDB_REALTIME,
     exec_query as _wcdb_exec_query,
-    get_display_names as _wcdb_get_display_names,
     get_sns_timeline as _wcdb_get_sns_timeline,
 )
 

@@ -370,6 +370,10 @@ section { margin-top: 12px; }
 }
 .c-cols-box label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .c-cols-box input { width: 14px; height: 14px; }
+.c-notice {
+  margin: 0; padding: 40px 0; text-align: center;
+  font-size: 13.5px; color: var(--muted);
+}
 .c-table-wrap {
   border: 1px solid var(--line); border-radius: 12px; overflow: auto;
   max-height: calc(100vh - 260px); min-height: 160px;
@@ -465,7 +469,7 @@ pre { margin: 8px 0 0; padding: 10px; border-radius: 8px; background: var(--bg);
 .bar input, .c-toolbar input, .m-friends-head input { min-width: 0; }
 .fm-dates input { padding: 6px 8px; }
 
-/* ---------- 聊天记录导出 ---------- */
+
 .chat-head, .chat-row { grid-template-columns: 26px minmax(120px, 1fr) minmax(0, 1.5fr) 88px 62px; gap: 10px; }
 .chat-row { cursor: pointer; }
 .chat-row .chat-name { display: flex; align-items: center; gap: 6px; min-width: 0; font-weight: 500; }
@@ -506,10 +510,6 @@ pre { margin: 8px 0 0; padding: 10px; border-radius: 8px; background: var(--bg);
   border: 1px solid var(--line); background: var(--card); color: var(--muted);
 }
 .chat-mini:hover { color: var(--brand); border-color: var(--brand); }
-.chat-kind-head {
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  margin: 0 0 6px; font-size: 12.5px; color: var(--muted);
-}
 .chat-kinds {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
   gap: 5px 10px; margin-bottom: 8px;
@@ -522,8 +522,11 @@ pre { margin: 8px 0 0; padding: 10px; border-radius: 8px; background: var(--bg);
 .chat-kind:hover { border-color: var(--brand); color: var(--brand); }
 .chat-kind input { width: 14px; height: 14px; margin: 0; accent-color: var(--brand); cursor: pointer; }
 .chat-kind.on { color: var(--text); font-weight: 500; background: var(--success-bg); border-color: var(--success-line); }
+.chat-kind-all { justify-content: center; border-style: dashed; font-family: inherit; }
 .chat-switch { display: inline-flex; width: fit-content; margin: 0 0 10px; }
-#cf-scopes { margin: 0 0 8px; }
+.chat-filter-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; margin: 0 0 10px; }
+.chat-filter-row #cf-scopes { margin: 0; }
+.chat-filter-row .chat-switch { margin: 0 0 0 auto; }
 .chat-result {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(228px, 1fr));
   gap: 2px 14px; align-content: start;
@@ -657,7 +660,7 @@ a.chat-chipcard:hover { border-color: var(--brand); }
 .chat-chip-title { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-chip-sub { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* 链接 / 公众号 / 小程序卡片：一眼看出是可点击的整块 */
+
 .chat-card {
   display: flex; align-items: stretch; gap: 10px; width: min(330px, 74vw);
   padding: 10px 11px; border-radius: 12px; text-decoration: none; color: inherit;

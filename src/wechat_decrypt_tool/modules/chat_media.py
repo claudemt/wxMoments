@@ -1,9 +1,3 @@
-"""聊天媒体解析：把消息里的图片 / 文件 / 语音 / 视频还原成本地可用的字节。
-
-微信 4.x 的图片按 `msg/attach/<md5(会话)>/<YYYY-MM>/Img/<md5>.dat` 存放，
-文件名与消息 XML 里的 md5 并不一致，因此这里用「会话目录 + 修改时间最接近」
-做一对一匹配；文件与视频本身是明文，直接按名称定位。
-"""
 
 from __future__ import annotations
 
@@ -22,7 +16,7 @@ logger = get_logger(__name__)
 from .chat_reader import _decode_bytes
 
 IMAGE_SUFFIXES = {".dat", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".wxgf"}
-IMAGE_TOLERANCE = 900          # 消息时间与文件时间允许的最大偏差（秒）
+IMAGE_TOLERANCE = 900
 _DERIVED_IMAGE = re.compile(r"_(?:t|h)(?:_w)?\.(?:dat|jpe?g|png|gif|webp|bmp|wxgf)$", re.I)
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v"}
 
@@ -34,7 +28,6 @@ def _session_hash(session: str) -> str:
 
 
 class ChatMedia:
-    """按会话解析媒体文件；所有方法在缺文件时返回 None，不抛异常。"""
 
     def __init__(self, wxid_dir: str | Path | None, account_dir: str | Path | None = None):
         self.wxid_dir = Path(wxid_dir).expanduser() if wxid_dir else None
@@ -44,7 +37,6 @@ class ChatMedia:
         self._files: dict[str, list[Path]] | None = None
         self._used: set[Path] = set()
 
-    # -- 基础 ---------------------------------------------------------------
     def _msg_dir(self) -> Path | None:
         if self.wxid_dir is None:
             return None
@@ -54,7 +46,6 @@ class ChatMedia:
     def available(self) -> bool:
         return self._msg_dir() is not None
 
-    # -- 图片 ---------------------------------------------------------------
     def _image_entries(self, session: str) -> list[tuple[float, Path]]:
         if session in self._images:
             return self._images[session]
@@ -101,8 +92,6 @@ class ChatMedia:
         entries = self._image_entries(session)
         if not entries:
             return None
-        # 只按原图匹配；缩略图（_t / _h / _t_W）和原图共用同一组 mtime，
-        # 若混在一起排序，取「原图」时反而会命中缩略图，预览就会一直很糊。
         pool = [item for item in entries if not _DERIVED_IMAGE.search(item[1].name)]
         used = used if used is not None else self._used
         path = self._pick(pool, float(create_time), used)
@@ -125,7 +114,7 @@ class ChatMedia:
     def read_media(self, path: Path) -> tuple[bytes, str]:
         try:
             data, mime = _read_and_maybe_decrypt_media(path, self.account_dir, self.wxid_dir)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("读取媒体失败 %s: %s", path.name, exc)
             return b"", ""
         if not data:
@@ -134,7 +123,6 @@ class ChatMedia:
             mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         return data, mime
 
-    # -- 文件 ---------------------------------------------------------------
     def _file_index(self) -> dict[str, list[Path]]:
         if self._files is not None:
             return self._files
@@ -165,7 +153,6 @@ class ChatMedia:
                     continue
         return candidates[0]
 
-    # -- 视频 ---------------------------------------------------------------
     def _video_entries(self) -> list[tuple[float, Path]]:
         if self._videos is not None:
             return self._videos
@@ -202,7 +189,6 @@ class ChatMedia:
         thumb = video.with_name(video.stem + "_thumb.jpg")
         return thumb if thumb.is_file() else None
 
-    # -- 语音 ---------------------------------------------------------------
     def voice_bytes(self, media_dbs: Iterable[Path], session: str, server_id: str
                     ) -> tuple[bytes, str, str]:
         from .media_decrypt import _convert_silk_to_browser_audio

@@ -5,7 +5,6 @@ fastapi
 httpx
 lxml
 pefile
-pilk
 pillow
 psutil
 pycryptodome

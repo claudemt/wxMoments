@@ -110,6 +110,28 @@ function chatSetStatus(text) {
   $("chat-status").textContent = text;
 }
 
+
+function chatShowNotice(text) {
+  const body = $("chat-body");
+  if (!body) return;
+  let notice = $("chat-notice");
+  if (!notice) {
+    notice = document.createElement("p");
+    notice.id = "chat-notice";
+    notice.className = "c-notice";
+    body.insertBefore(notice, body.firstChild);
+  }
+  const hasText = Boolean(text);
+  notice.textContent = text || "";
+  notice.hidden = !hasText;
+  const tools = body.querySelector(".m-tools");
+  const head = body.querySelector(".chat-head");
+  if (tools) tools.hidden = hasText;
+  if (head) head.hidden = hasText;
+  show($("chat-list"), !hasText);
+  show($("chat-pager"), !hasText);
+}
+
 function chatSetBusy(busy) {
   $("chat-init").disabled = busy;
   $("chat-init").textContent = busy ? "刷新中…" : "刷新";
@@ -157,7 +179,9 @@ async function chatLoadStatus() {
   }
   if (!chatState.ready) {
     chatSetStatus("");
-    show($("chat-body"), false);
+    show($("chat-body"), true);
+    chatShowNotice("点上方「刷新」读取聊天记录");
+    chatUpdateTools();
     return;
   }
   chatState.shards = res.shards || 0;
@@ -165,6 +189,7 @@ async function chatLoadStatus() {
   chatSetStatus(`共 ${shown} 个会话`);
   $("chat-status").title = res.shards ? `${res.shards} 个消息库` : "";
   show($("chat-body"), true);
+  chatShowNotice("");
   for (const warning of res.warnings || []) notify(warning, "warning");
 }
 
@@ -338,6 +363,16 @@ function chatRenderKinds() {
     row.append(input, text);
     box.append(row);
   }
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.id = "cf-kinds-all";
+  toggle.className = "chat-kind chat-kind-all";
+  toggle.onclick = () => {
+    const all = chatState.draftKinds.size === CHAT_KIND_OPTIONS.length;
+    chatState.draftKinds = new Set(all ? [] : CHAT_KIND_OPTIONS.map((item) => item[0]));
+    chatRenderKinds();
+  };
+  box.append(toggle);
   chatUpdateKindAll();
 }
 
@@ -397,7 +432,7 @@ async function chatLoadFilterResult() {
       show_folded: chatState.draftShowFolded,
       page: 0,
       page_size: CHAT_FILTER_LIMIT,
-    });
+    }, true);
   } catch (error) {
     countEl.textContent = "加载失败";
     return;
@@ -472,30 +507,6 @@ async function chatApplyFilter() {
   chatState.scope = chatState.draftScope;
   chatState.kinds = new Set(chatState.draftKinds);
   chatState.showFolded = chatState.draftShowFolded;
-  show($("chat-filter-overlay"), false);
-  await chatLoadSessions(0);
-  chatUpdateTools();
-}
-
-async function chatResetFilter() {
-  chatState.start = "";
-  chatState.end = "";
-  chatState.query = "";
-  chatState.scope = "chat";
-  chatState.draftScope = "chat";
-  chatState.kinds = new Set(CHAT_KIND_OPTIONS.map((item) => item[0]));
-  chatState.draftKinds = new Set(chatState.kinds);
-  chatState.showFolded = false;
-  chatState.draftShowFolded = false;
-  $("cf-start").value = "";
-  $("cf-end").value = "";
-  $("cf-search").value = "";
-  if ($("cf-folded")) $("cf-folded").checked = false;
-  if ($("cf-folded-row")) $("cf-folded-row").classList.remove("on");
-  chatChips($("cf-scopes"), CHAT_SCOPES, chatState.draftScope, (value) => {
-    chatState.draftScope = value;
-  });
-  chatRenderKinds();
   show($("chat-filter-overlay"), false);
   await chatLoadSessions(0);
   chatUpdateTools();
@@ -598,7 +609,6 @@ function chatChipCard(label, title, sub, href) {
   }
   node.append(chatEl("b", "", label));
   const body = chatEl("span", "chat-chip-body");
-  // 标题与标签同名（如「群公告 群公告」）时只保留标签
   if (title && title !== label) body.append(chatEl("span", "chat-chip-title", title));
   if (sub) body.append(chatEl("span", "chat-chip-sub", sub));
   if (body.childNodes.length) node.append(body);
@@ -727,7 +737,6 @@ function chatMessageNode(message, showTime = true) {
   const kind = message.kind || "other";
   const extra = message.extra || {};
   const plain = String(message.text || "").trim();
-  // 拍一拍偶尔会被记成普通文本（英文模板 tickled），统一按居中系统提示渲染
   const patLike = /tickled/i.test(plain)
     || (/^["“]?.{0,20}["”]?\s{0,2}拍了拍\s/.test(plain) && plain.length <= 60);
   if (kind === "system" || patLike) {
@@ -760,7 +769,6 @@ function chatMessageNode(message, showTime = true) {
     if (extra.forward_truncated) card.append(chatEl("div", "chat-att-miss", "（已截断）"));
     bubble.append(card);
   }
-  // 卡片 / 媒体节点自己带标题，正文不再重复
   if (message.text && !CHAT_CARD_KINDS.includes(kind)) {
     bubble.append(chatEl("div", "chat-text", message.text));
   }
@@ -805,7 +813,6 @@ function chatRenderPreview(batch, append = false) {
     lastTs = message.create_time;
   }
   if (append) {
-    // 增量插到顶部，避免每翻一页都把整棵 DOM 重建一遍
     const oldFirst = body.firstElementChild;
     body.insertBefore(frag, body.firstChild);
     if (oldFirst && oldFirst.classList.contains("chat-date")
@@ -885,8 +892,6 @@ async function chatLoadPreview(reset, budget = 0) {
   if (!chatState.loadingAll) chatPreviewMeta();
   return res;
 }
-
-// 单次预览最多堆到 20 万条，超过后只保留手动「加载更早消息」
 const CHAT_LOAD_ALL_MAX = 200000;
 
 async function chatLoadAll() {
@@ -948,13 +953,7 @@ $("chat-select-all").onclick = chatSelectAll;
 $("chat-filter-btn").onclick = chatOpenFilter;
 $("cf-close").onclick = chatCloseFilters;
 $("cf-apply").onclick = chatApplyFilter;
-$("cf-reset").onclick = chatResetFilter;
 $("cf-result-all").onclick = chatPickAllResults;
-$("cf-kinds-all").onclick = () => {
-  const all = chatState.draftKinds.size === CHAT_KIND_OPTIONS.length;
-  chatState.draftKinds = new Set(all ? [] : CHAT_KIND_OPTIONS.map((item) => item[0]));
-  chatRenderKinds();
-};
 $("cf-search").oninput = chatQueueFilterResult;
 $("cf-start").onchange = chatQueueFilterResult;
 $("cf-end").onchange = chatQueueFilterResult;

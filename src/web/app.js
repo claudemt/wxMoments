@@ -2,16 +2,33 @@
 
 const $ = (id) => document.getElementById(id);
 
+let lastNotify = { text: "", at: 0 };
 function notify(message, level = "error") {
-  return floating.message(String(message || "操作失败"), level);
+  const text = String(message || "操作失败");
+  const now = Date.now();
+  if (text === lastNotify.text && now - lastNotify.at < 1500) return;
+  lastNotify = { text, at: now };
+  return floating.message(text, level);
 }
 const enqueueBanner = (message) => notify(message, "success");
 
 window.addEventListener("unhandledrejection", (event) => {
   event.preventDefault();
-  if (!event.reason?.reported) notify(event.reason?.message || "操作失败");
+  const reason = event.reason;
+  if (reason?.reported) return;
+  const text = reason?.message || reason?.error?.message
+    || (typeof reason === "string" ? reason : "")
+    || "操作失败，请按 Ctrl+F5 强制刷新页面后重试";
+  notify(text);
 });
 window.addEventListener("error", (event) => notify(event.message || "页面出错，请刷新"));
+
+function describeFetchFailure(path, response, result) {
+  if (result && typeof result === "object" && result.msg) return result.msg;
+  if (!response) return `无法连接本地服务（${path}），请关闭窗口后重新双击 run.bat`;
+  if (response.status === 404) return `接口不存在（${path}），页面可能是旧版本，请按 Ctrl+F5 强制刷新`;
+  return `服务错误 ${response.status}（${path}）`;
+}
 
 async function api(path, body, silent = false) {
   try {
@@ -21,26 +38,56 @@ async function api(path, body, silent = false) {
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(60000),
     });
-    const result = await response.json().catch(() => ({
-      ok: false, msg: `服务错误 ${response.status}`,
-    }));
-    if (!response.ok || result.ok === false) {
-      if (!silent) notify(result.msg || `服务返回错误（${response.status}）`);
+    const result = await response.json().catch(() => null);
+    if (!response.ok || (result && result.ok === false)) {
+      const message = describeFetchFailure(path, response, result);
+      if (!silent) notify(message);
       if (!response.ok) {
-        const error = new Error(result.msg || `HTTP ${response.status}`);
+        const error = new Error(message);
         error.reported = !silent;
         throw error;
       }
+      return result;
+    }
+    if (!result) {
+      const error = new Error(`服务返回了非预期内容（${path}），请重启后刷新`);
+      if (!silent) notify(error.message);
+      error.reported = !silent;
+      throw error;
     }
     return result;
   } catch (error) {
+    if (error.name === "TimeoutError" || error.name === "AbortError") {
+      const message = `请求超时（${path}），数据量较大时可稍后重试`;
+      if (!silent) notify(message);
+      const timeoutError = new Error(message);
+      timeoutError.reported = !silent;
+      throw timeoutError;
+    }
     if (!silent && !error.reported) {
-      notify("连不上本地服务，请重启后刷新");
+      notify(`无法连接本地服务（${path}），请关闭窗口后重新双击 run.bat`);
       error.reported = true;
     }
     throw error;
   }
 }
+
+const PAGE_BUILD = document.querySelector('meta[name="wx-build"]')?.content || "";
+let buildWarned = false;
+
+
+async function checkBuild() {
+  if (!PAGE_BUILD || buildWarned) return;
+  try {
+    const res = await api("/api/version", undefined, true);
+    if (res?.ok && res.build && res.build !== PAGE_BUILD) {
+      buildWarned = true;
+      notify("页面不是最新版本，请按 Ctrl+F5 强制刷新后再操作", "warning");
+    }
+  } catch (error) {  }
+}
+checkBuild();
+setInterval(checkBuild, 60000);
 
 function show(el, on = true) { el.hidden = !on; }
 function escapeHtml(s) {
@@ -165,7 +212,6 @@ function creepPercent(item) {
     item.shown = Math.max(prev, real);
     return item.shown;
   }
-  // 只在真实进度之上留 2.5% 的平滑余量，不再靠虚涨冲到 95%/99% 造成"卡死"错觉
   const drift = Math.min(2.5, Math.max(0, 100 - real) * 0.02);
   item.shown = Math.min(100, Math.max(real, Math.min(prev + 0.6, real + drift)));
   return item.shown;
@@ -233,7 +279,6 @@ function renderJob(item) {
   show(view.open, job.status === "done" && !!item.dir);
   if (item.completed && !item.closing) {
     item.closing = true;
-    // 完成态留足时间让用户点「打开目录」；鼠标悬停时本就会暂停自动关闭
     floating.finish(popup, job.status === "error" ? 8000 : item.dir ? 12000 : 4000);
   }
 }
@@ -252,13 +297,26 @@ async function pollJob() {
         if (job.results?.[0]?.dir) item.dir = job.results[0].dir;
         if (job.status !== "running") item.completed = true;
         renderJob(item);
-        if (item.completed && item.onComplete) await item.onComplete(job);
+        if (item.completed && item.onComplete) {
+          try {
+            await item.onComplete(job);
+          } catch (error) {
+            notify(error?.message || "后续加载失败，请点「刷新」重试");
+          }
+        }
       } catch (error) {
-        if (error.message.includes("任务不存在")) {
+        const message = error?.message || "";
+        if (message.includes("任务不存在")) {
           item.completed = true;
           item.snapshot = { status: "error", message: "任务已失效，请重新操作。", log: [] };
           renderJob(item);
-          if (item.onComplete) await item.onComplete(item.snapshot);
+          if (item.onComplete) {
+            try {
+              await item.onComplete(item.snapshot);
+            } catch (inner) {
+              notify(inner?.message || "后续加载失败，请点「刷新」重试");
+            }
+          }
         }
       }
     }
@@ -459,6 +517,7 @@ async function finishInit(job) {
   mState.account = job.results?.[0]?.account || "";
   cState.loaded = false;
   show($("m-body"));
+  show($("m-empty"), false);
   await loadContacts();
   await refreshTimeline();
   await loadChatList();
@@ -1096,6 +1155,7 @@ async function refreshTimeline() {
     if (/未初始化|未就绪|解密|请先点击「刷新」/.test(res.msg || "")) {
       mState.inited = false;
       show($("m-body"), false);
+      show($("m-empty"), true);
       resetInitBtn();
     }
     return;
@@ -1333,12 +1393,14 @@ $("c-init").onclick = initMoments;
 async function loadChatList() {
   let res;
   try {
-    res = await api("/api/chatlist/all", {});
+    res = await api("/api/chatlist/all", {}, true);
   } catch (e) {
+    showChatListNotice("暂时读不到数据，请点上方「刷新」重试");
     return;
   }
-  if (!res.ok) {
-    notify(res.msg || "读取失败", "warning");
+  if (!res || !res.ok) {
+    const msg = String(res?.msg || "");
+    showChatListNotice(/刷新/.test(msg) ? "点上方「刷新」读取微信数据" : (msg || "暂时读不到数据"));
     return;
   }
   cState.loaded = true;
@@ -1347,7 +1409,26 @@ async function loadChatList() {
   if (res.contact_columns) cState.columnDefs.contacts = res.contact_columns;
   if (res.group_columns) cState.columnDefs.groups = res.group_columns;
   show($("c-body"), true);
+  showChatListNotice("");
   renderChatList();
+}
+
+
+function showChatListNotice(text) {
+  const notice = $("c-notice");
+  if (!notice) return;
+  const hasText = Boolean(text);
+  notice.textContent = text || "";
+  show(notice, hasText);
+  if (hasText) show($("c-body"), true);
+  const wrap = $("c-table")?.closest(".c-table-wrap");
+  if (wrap) wrap.hidden = hasText;
+  show($("c-toolbar"), !hasText);
+  show($("c-pager"), !hasText);
+  if (hasText) {
+    cState.loaded = false;
+    $("c-export").disabled = true;
+  }
 }
 
 function chatListItems() {
@@ -1417,7 +1498,6 @@ document.addEventListener("click", (e) => {
 function chatListCols() {
   const kind = cState.kind;
   const picked = cState.columns[kind];
-  // 始终按列定义的顺序输出，避免勾选顺序打乱表格与 CSV
   return Object.keys(cState.columnDefs[kind]).filter((key) => picked.includes(key));
 }
 
@@ -1515,6 +1595,7 @@ function setChatListKind(kind) {
     btn.classList.toggle("active", btn.dataset.kind === kind);
   }
   $("c-search").placeholder = kind === "groups" ? "搜索群聊" : "搜索好友";
+  if (!cState.loaded) return;
   renderChatList();
 }
 

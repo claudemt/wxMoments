@@ -1,6 +1,5 @@
 import ctypes
 import datetime
-import hashlib
 import ipaddress
 import json
 import mimetypes

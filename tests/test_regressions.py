@@ -1,4 +1,3 @@
-"""Regression checks using synthetic data only; no WeChat process or network."""
 import asyncio
 import contextlib
 import io
@@ -20,7 +19,7 @@ import server
 import wxmoments
 from author_watch import AuthorWatch
 from web_runtime import Job, diagnostics, start_job
-from wechat_download import exporter, harvest, wechat, wxprofile
+from wechat_download import harvest, wechat, wxprofile
 from wechat_decrypt_tool.modules import chat_reader, wechat_decrypt
 
 
@@ -108,7 +107,6 @@ class GroupTests(unittest.TestCase):
                                    "members": [{"wxid": "u1", "name": "张三"}]})
             wxmoments.save_groups(path, data)
             self.assertEqual(wxmoments.load_groups(path)["groups"][0]["id"], "g1")
-            # 损坏的文件按空处理，不抛错
             path.write_text("{not json", encoding="utf-8")
             self.assertEqual(wxmoments.load_groups(path)["groups"], [])
 
@@ -153,7 +151,6 @@ class GroupTests(unittest.TestCase):
 
 
 class GroupExportTests(unittest.TestCase):
-    """拆分 / 组合两种分组导出模式。"""
 
     def _run_group(self, split, directory):
         timestamp = datetime(2026, 1, 1, 12, 0, 0).timestamp()
@@ -376,7 +373,7 @@ class JobTests(unittest.TestCase):
         stdout, stderr = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             a = start_job(1, work, "job-alpha", finished[0])
-            b = start_job(1, work, "job-beta", finished[1])
+            start_job(1, work, "job-beta", finished[1])
             self.assertTrue(all(event.wait(3) for event in finished))
         self.assertIn("job-alpha", " ".join(a.to_dict()["log"]))
         self.assertNotIn("job-beta", " ".join(a.to_dict()["log"]))
@@ -531,6 +528,15 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 500)
         self.assertIn("模拟请求错误", response.json()["msg"])
 
+    async def test_page_build_matches_server_build(self):
+        import httpx
+        html = (server.SRC_DIR / "web" / "index.html").read_text(encoding="utf-8-sig")
+        self.assertIn(f'content="{server.WEB_BUILD}"', html)
+        transport = httpx.ASGITransport(app=server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/version")
+        self.assertEqual(response.json(), {"ok": True, "build": server.WEB_BUILD})
+
 
 @unittest.skipUnless(os.name == "nt", "Windows launcher")
 class LauncherTests(unittest.TestCase):
@@ -560,21 +566,22 @@ class LauncherTests(unittest.TestCase):
 
     def test_nonfatal_stderr_stays_out_of_terminal(self):
         result, page = self._launch("import sys\nprint('normal output')\nsys.stderr.write('nonfatal warning\\n')\n")
-        # 服务进程立即退出（未监听端口）→ 判定启动失败；stderr 细节进错误页文件，不进终端。
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertEqual(result.stdout + result.stderr, b"")
-        self.assertIn("nonfatal warning", page)
+        output = (result.stdout + result.stderr).decode("utf-8", "replace")
+        self.assertNotIn("nonfatal warning", output)
+        self.assertEqual(result.stderr, b"")
+        self.assertIn("FAILED", output)
 
-    def test_startup_crash_creates_browser_error_page(self):
+    def test_startup_failure_stays_in_console(self):
         result, page = self._launch("import sys\nsys.stderr.write('fixture failure\\n')\nsys.exit(3)\n")
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertEqual(result.stdout + result.stderr, b"")
-        self.assertIn("fixture failure", page)
-        self.assertIn("启动未完成", page)
+        output = (result.stdout + result.stderr).decode("utf-8", "replace")
+        self.assertIn("FAILED", output)
+        self.assertEqual(result.stderr, b"")
+        self.assertEqual(page, "")
 
 
 class ChatPagingTests(unittest.TestCase):
-    """跨分片倒序分页：每个分片各自推进游标，不能漏数据也不能重复。"""
 
     SESSION = "friend"
 
@@ -601,7 +608,6 @@ class ChatPagingTests(unittest.TestCase):
                        'real_sender_id INTEGER, create_time INTEGER, '
                        'message_content BLOB, compress_content BLOB)')
             for index in range(1, per_shard + 1):
-                # 两个分片的时间戳交错，模拟真实多库乱序
                 moment = (index - 1) * 2 + 1 + shard
                 db.execute(f'insert into "{table}" values (?, 0, 1, 0, 0, ?, ?, null)',
                            (index, moment, f"s{shard}-{index}".encode()))
@@ -622,7 +628,7 @@ class ChatPagingTests(unittest.TestCase):
                     cursor = page["next_cursor"]
                     if not cursor:
                         break
-                    self.assertLess(len(times), 50)  # 防死循环
+                    self.assertLess(len(times), 50)
             finally:
                 store.close()
             self.assertEqual(len(seen), 10)
@@ -636,7 +642,6 @@ class ChatPagingTests(unittest.TestCase):
             root = Path(directory)
             self._build(root)
             table = chat_reader.message_table_for(self.SESSION)
-            # 图片消息放在时间最老的一侧，只在翻到最后才会命中
             db = sqlite3.connect(root / "message_0.db")
             db.execute(f'insert into "{table}" values (99, 0, 3, 0, 0, 0, ?, null)',
                        (b'<msg><img /></msg>',))
@@ -707,7 +712,6 @@ class ChatPagingTests(unittest.TestCase):
             self.assertEqual(ids, [self.SESSION], "空会话不该出现在首页")
 
     def _fold(self, root: Path, username: str) -> None:
-        """contact.flag 的 bit28 是微信 4.x 的「折叠该群聊」。"""
         conn = sqlite3.connect(root / "contact.db")
         conn.execute("insert or replace into contact values (?, x'', x'', x'', ?)",
                      (username.encode(), chat_reader.CONTACT_FLAG_FOLDED | 3))
@@ -715,7 +719,6 @@ class ChatPagingTests(unittest.TestCase):
         conn.close()
 
     def _pin(self, root: Path, username: str) -> None:
-        """contact.flag 的 bit11 是微信 4.x 的置顶位，低两位是「是群 / 已保存」基础位。"""
         conn = sqlite3.connect(root / "contact.db")
         conn.execute("insert or replace into contact values (?, x'', x'', x'', ?)",
                      (username.encode(), chat_reader.CONTACT_FLAG_PINNED | 3))
@@ -726,7 +729,6 @@ class ChatPagingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             self._build(root)
-            # 置顶会话的消息时间可以比普通会话更早，仍要排在前面
             self._add_session(root, "pinned_old", last=50, sort=50)
             self._add_session(root, "pinned_newer", last=70, sort=70)
             self._add_session(root, "normal_latest", last=99, sort=99)
@@ -759,7 +761,6 @@ class ChatPagingTests(unittest.TestCase):
             self.assertFalse(marks[self.SESSION])
 
     def test_sort_timestamp_alone_is_not_pinned(self):
-        # sort_timestamp 被抬高只说明会话排位变过，不等于置顶
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             self._build(root)
@@ -773,7 +774,6 @@ class ChatPagingTests(unittest.TestCase):
 
 
 class ChatSessionFilterTests(unittest.TestCase):
-    """折叠群聊默认不出现在会话列表里，勾选后才回来。"""
 
     def _state(self) -> dict:
         rows = [
@@ -801,7 +801,6 @@ class ChatSessionFilterTests(unittest.TestCase):
 
 
 class ChatListExportTests(unittest.TestCase):
-    """好友 / 群聊列表导出：元数据解析与 CSV 单元格格式化。"""
 
     def _build(self, root: Path) -> None:
         conn = sqlite3.connect(root / "contact.db")
@@ -862,7 +861,6 @@ class ChatListExportTests(unittest.TestCase):
             self._build(root)
             contacts = wxmoments.load_contact_details(root)
         by_id = {c["wxid"]: c for c in contacts}
-        # 群聊不会出现在好友里，但群主是普通联系人
         self.assertNotIn("123@chatroom", by_id)
         self.assertIn("wxid_friend", by_id)
         self.assertFalse(by_id["wxid_friend"]["pinned"])

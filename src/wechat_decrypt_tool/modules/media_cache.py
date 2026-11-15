@@ -73,7 +73,6 @@ _MEDIA_INDEX_VIDEO_STREAM_EXTS = {
     ".mov",
     ".mp4",
 }
-_MEDIA_INDEX_VIDEO_INDEX_EXTS = _MEDIA_INDEX_VIDEO_STREAM_EXTS | {".dat"}
 _MEDIA_INDEX_STRIP_SUFFIX_RE = re.compile(r"(?i)(?:_h|_t|_thumb)$")
 _MEDIA_INDEX_DB_VERSION = 4
 _EMOTICON_MD5_RE = re.compile(r"(?i)^[0-9a-f]{32}$")

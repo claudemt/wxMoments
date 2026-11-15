@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
+from wechat_decrypt_tool.modules.text_decoding import decode_text
+
 LABELS_VERSION = 1
 LABEL_ID_PREFIX = "wlab:"
 LABEL_FOLDER_PREFIX = "朋友圈-微信标签-"
@@ -199,15 +201,7 @@ def _decode(value: Any) -> str:
     if isinstance(value, memoryview):
         value = value.tobytes()
     if isinstance(value, (bytes, bytearray)):
-        raw = bytes(value)
-        for encoding in ("utf-8", "utf-16-le"):
-            try:
-                text = raw.decode(encoding).replace("\x00", "").strip()
-            except (UnicodeDecodeError, ValueError):
-                continue
-            if text:
-                return text
-        return ""
+        return decode_text(value).replace("\xa0", " ").strip()
     return str(value).replace("\xa0", " ").strip()
 
 

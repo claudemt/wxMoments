@@ -3,7 +3,7 @@ from __future__ import annotations
 from ..exceptions import MediaError
 
 from .constants import (
-    MAX_IMAGE_DOWNLOAD_BYTES, MAX_VIDEO_DOWNLOAD_BYTES,
+    MAX_IMAGE_DOWNLOAD_BYTES,
     VIDEO_DECRYPT_SIZE, ALLOWED_CDN_DOMAINS,
 )
 
@@ -36,16 +36,10 @@ _NATIVE_DIR = _PACKAGE_DIR / "native"
 _WEFLOW_WASM_DIR = _NATIVE_DIR / "weflow_wasm"
 
 
-
-
-
-
 _REPORT_LOCK = threading.Lock()
 _REPORT_COUNTS: dict[str, int] = {}
 _REPORT_SAMPLES: dict[str, list[dict[str, Any]]] = {}
 _REPORT_SAMPLE_LIMIT = 5
-
-
 
 
 _RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
@@ -537,89 +531,6 @@ def maybe_decrypt_sns_video_file(path: Path, key: str) -> bool:
             return True
     except Exception:
         return False
-
-
-async def materialize_sns_remote_video(
-    *,
-    account_dir: Path,
-    url: str,
-    key: str,
-    token: str,
-    use_cache: bool,
-    client: Optional[httpx.AsyncClient] = None,
-) -> Optional[Path]:
-    fixed_url = fix_sns_cdn_url(str(url or ""), token=str(token or ""), is_video=True)
-    if not fixed_url:
-        return None
-
-    cache_dir, cache_stem = _sns_remote_video_cache_dir_and_stem(account_dir, url=fixed_url, key=str(key or ""))
-
-    if use_cache:
-        existing = get_cached_sns_remote_video(
-            account_dir=account_dir,
-            url=fixed_url,
-            key=key,
-            token=token,
-        )
-        if existing is not None:
-            return existing
-
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    tmp_path = cache_dir / f"{cache_stem}.mp4.{time.time_ns()}.tmp"
-    try:
-        await _download_sns_remote_to_file(
-            fixed_url,
-            tmp_path,
-            max_bytes=MAX_VIDEO_DOWNLOAD_BYTES,
-            client=client,
-        )
-    except Exception:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        return None
-
-    await asyncio.to_thread(maybe_decrypt_sns_video_file, tmp_path, str(key or ""))
-
-    ok_mp4 = False
-    try:
-        with tmp_path.open("rb") as f:
-            head = f.read(8)
-        ok_mp4 = _detect_mp4_ftyp(head)
-    except Exception:
-        ok_mp4 = False
-
-    if not ok_mp4:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        return None
-
-    final_path = cache_dir / f"{cache_stem}.mp4"
-    try:
-        os.replace(str(tmp_path), str(final_path))
-    except Exception:
-        final_path = tmp_path
-
-    for other_ext in _SNS_REMOTE_VIDEO_CACHE_EXTS:
-        if other_ext.lower() == ".mp4":
-            continue
-        other = cache_dir / f"{cache_stem}{other_ext}"
-        try:
-            if other.exists() and other.is_file():
-                other.unlink(missing_ok=True)
-        except Exception:
-            continue
-    return final_path
-
-
-def best_effort_unlink(path: str) -> None:
-    try:
-        Path(path).unlink(missing_ok=True)
-    except Exception:
-        pass
 
 
 def detect_image_mime(data: bytes) -> str:

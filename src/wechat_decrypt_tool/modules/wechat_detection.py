@@ -12,6 +12,7 @@ from typing import Any
 
 import psutil
 
+from .text_decoding import decode_text
 from .database_filters import should_skip_source_database
 
 _DEBUG_DETECTION = os.environ.get("WXMOMENTS_DEBUG_DETECTION", "").strip().lower() in {
@@ -110,7 +111,7 @@ def parse_global_config(base_path: str) -> dict[str, str] | None:
                     return None
                 str_len, offset = decode_varint(data, offset)
                 if str_len > 0 and offset + str_len <= len(data):
-                    return data[offset : offset + str_len].decode("utf-8", errors="ignore")
+                    return decode_text(data[offset : offset + str_len])
             except Exception:
                 return None
             return None

@@ -23,6 +23,7 @@ from wechat_decrypt_tool.modules.constants import (
     PDF_FONT_NAME, PDF_FONT_FALLBACK, PDF_DPI,
     PDF_MARGIN_LEFT, PDF_MARGIN_RIGHT, PDF_MARGIN_TOP, PDF_MARGIN_BOTTOM,
 )
+from wechat_decrypt_tool.modules.text_decoding import decode_text
 from wechat_decrypt_tool.modules.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -30,7 +31,6 @@ logger = get_logger(__name__)
 from wechat_decrypt_tool.modules.wechat_emoji import emojify_wechat_shortcodes
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SRC_ROOT = PROJECT_ROOT / "src"
 CONFIG_DIR = PROJECT_ROOT / "config"
 DEFAULT_CONFIG = CONFIG_DIR / "config.json"
 RUNTIME_DIR = PROJECT_ROOT / "runtime"
@@ -87,11 +87,22 @@ def save_config(path: Path, config: dict[str, Any]) -> None:
 
 GROUPS_VERSION = 1
 _ILLEGAL_FOLDER_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+_MAX_FOLDER_NAME_CHARS = 60
+_RESERVED_FOLDER_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
 
 
 def sanitize_folder_name(value: str, fallback: str = "分组") -> str:
-    name = _ILLEGAL_FOLDER_CHARS.sub("_", str(value or "").strip())
-    name = name.rstrip(" .")
+    name = _ILLEGAL_FOLDER_CHARS.sub("_", str(value or ""))
+    name = re.sub(r"\s+", " ", name).strip().rstrip(" .")
+    if len(name) > _MAX_FOLDER_NAME_CHARS:
+        digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:6]
+        name = f"{name[:_MAX_FOLDER_NAME_CHARS - 7].rstrip(' .')}-{digest}"
+    if name.upper() in _RESERVED_FOLDER_NAMES:
+        name = f"_{name}"
     return name or fallback
 
 
@@ -810,16 +821,7 @@ def decode_contact_text(value: Any) -> str:
     if isinstance(value, memoryview):
         value = value.tobytes()
     if isinstance(value, (bytes, bytearray)):
-        raw = bytes(value)
-        for encoding in ("utf-8", "utf-16-le", "utf-16"):
-            try:
-                text = raw.decode(encoding, errors="ignore")
-                text = text.replace("\x00", "").replace("\xa0", " ").strip()
-                if text:
-                    return text
-            except Exception:
-                continue
-        return ""
+        return decode_text(value).replace("\xa0", " ").strip()
     return str(value).replace("\xa0", " ").strip()
 
 

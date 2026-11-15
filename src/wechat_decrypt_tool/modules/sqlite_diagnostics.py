@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -173,12 +172,3 @@ def sqlite_diagnostics_status(diagnostics: Mapping[str, Any]) -> str:
     if diagnostics.get("quick_check_ok") is True:
         return "ok"
     return "header_only"
-
-
-def format_sqlite_diagnostics(diagnostics: Mapping[str, Any]) -> str:
-    compact: dict[str, Any] = {}
-    for key, value in diagnostics.items():
-        if value in (None, "", [], {}):
-            continue
-        compact[str(key)] = value
-    return json.dumps(compact, ensure_ascii=False, sort_keys=True)

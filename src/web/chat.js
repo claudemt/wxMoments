@@ -559,7 +559,7 @@ function chatCardCover(label, source, thumb) {
   const cover = chatEl("div", "chat-card-cover");
   const fallback = () => {
     cover.classList.add("is-fallback");
-    cover.append(chatEl("span", "chat-card-cover-glyph", (source || label).slice(0, 1)));
+    cover.append(chatEl("span", "chat-card-cover-glyph", Array.from(String(source || label || ""))[0] || ""));
     cover.append(chatEl("span", "chat-card-cover-tag", label));
   };
   if (thumb) {
@@ -914,7 +914,7 @@ async function chatLoadAll() {
     if (!res) break;
     guard += 1;
     if (!res.has_more) break;
-    if (res.next_cursor && res.next_cursor === before) break;  // 游标没前进，避免空转
+    if (res.next_cursor && res.next_cursor === before) break;
   }
   chatState.loadingAll = false;
   btn.textContent = "加载全部";

@@ -51,16 +51,3 @@ def should_include_in_database_count(file_name: str | Path) -> bool:
     if lower_name in _INTERNAL_OUTPUT_DATABASE_NAMES:
         return False
     return True
-
-
-def list_countable_database_names(account_dir: Path) -> list[str]:
-    if not account_dir.exists():
-        return []
-
-    db_files = [
-        path.name
-        for path in account_dir.glob("*.db")
-        if path.is_file() and should_include_in_database_count(path.name)
-    ]
-    db_files.sort()
-    return db_files

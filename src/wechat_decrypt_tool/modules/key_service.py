@@ -27,7 +27,6 @@ from .image_key_resolver import (
     scan_v2_templates,
     verify_key_pair,
 )
-from .image_key_memory_scan import scan_image_key_from_memory
 from .key_store import (
     get_account_keys_from_store,
     normalize_key_store_path,
@@ -694,14 +693,6 @@ def get_db_key_workflow(
     return result
 
 
-def get_wechat_internal_global_config(wx_dir: Path, file_name1) -> bytes:
-    xwechat_files_root = wx_dir.parent
-    target_path = os.path.join(xwechat_files_root, "all_users", "config", file_name1)
-    if not os.path.exists(target_path):
-        raise FileNotFoundError(f"找不到配置文件: {target_path}，请确认微信数据目录结构是否完整")
-    return Path(target_path).read_bytes()
-
-
 def try_get_local_image_keys() -> List[Dict[str, Any]]:
     if wx_key is None or not hasattr(wx_key, 'get_image_key'):
         logger.info("[image_key] 本地算法不可用：wx_key.get_image_key 缺失")
@@ -800,10 +791,6 @@ def _get_image_key_kvcomm_dirs(account_dir: Optional[Path] = None) -> tuple[Path
     if existing:
         return existing
     return tuple(deduplicated[:1])
-
-
-def _get_image_key_kvcomm_dir(account_dir: Optional[Path] = None) -> Path:
-    return _get_image_key_kvcomm_dirs(account_dir)[0]
 
 
 def _resolve_local_image_key_from_kvcomm_candidates(
@@ -1176,70 +1163,3 @@ async def get_image_key_integrated_workflow(
                 )
 
     raise RuntimeError("无法在本机取得已验证的图片密钥，请保持微信已登录后重试")
-
-
-async def get_image_key_memory_workflow(
-        account: Optional[str] = None,
-        *,
-        wxid_dir: Optional[str] = None,
-        db_storage_path: Optional[str] = None,
-        timeout: float = 60,
-) -> Dict[str, Any]:
-    resolved_wxid_dir = _resolve_wxid_dir_for_image_key(
-        account,
-        wxid_dir=wxid_dir,
-        db_storage_path=db_storage_path,
-    )
-    canonical_account = resolved_wxid_dir.name
-    logger.info(
-        "[image_key] 开始显式内存扫描: account=%s wxid_dir=%s timeout=%ss",
-        canonical_account,
-        str(resolved_wxid_dir),
-        timeout,
-    )
-
-    timeout_seconds = max(0.0, float(timeout))
-    try:
-        resolution = await asyncio.wait_for(
-            asyncio.to_thread(
-                scan_image_key_from_memory,
-                resolved_wxid_dir,
-                timeout_seconds,
-            ),
-            timeout=timeout_seconds,
-        )
-    except asyncio.TimeoutError:
-        resolution = None
-    if resolution is None or resolution.verified is not True:
-        raise RuntimeError(
-            f"{int(timeout_seconds)} 秒内未在微信进程内存中找到可通过 V2 图片验真的 AES 密钥"
-        )
-
-    _persist_verified_image_keys(
-        canonical_account=canonical_account,
-        request_account=account,
-        source_wxid_dir=resolved_wxid_dir,
-        matched_wxid=canonical_account,
-        xor_key=resolution.xor_key,
-        aes_key=resolution.aes_key,
-        source="memory_v2_verified",
-    )
-    logger.info(
-        "[image_key] 内存候选通过 V2 验真: account=%s pid=%s encoding=%s key_pair_verified=true",
-        canonical_account,
-        resolution.pid,
-        resolution.encoding,
-    )
-
-    result = _verified_image_key_result(
-        canonical_account=canonical_account,
-        matched_wxid=canonical_account,
-        xor_key=resolution.xor_key,
-        aes_key=resolution.aes_key,
-        source="memory_v2_verified",
-        template_path=resolution.template_path,
-    )
-    result.update({"pid": resolution.pid, "encoding": resolution.encoding})
-    return result
-
-

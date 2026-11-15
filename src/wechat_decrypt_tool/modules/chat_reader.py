@@ -11,8 +11,10 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
+from .text_decoding import decode_text
 from .logging_config import get_logger
 from .wechat_emoji import emojify_wechat_shortcodes
+from .wechat_xml import parse_xml
 
 logger = get_logger(__name__)
 
@@ -21,7 +23,6 @@ MAX_FIELD_BYTES = 4 * 1024 * 1024
 MAX_XML_BYTES = 1024 * 1024
 MAX_XML_NODES = 6000
 MAX_FORWARD_ITEMS = 200
-MAX_FORWARD_DEPTH = 3
 DEFAULT_LIMIT = 60
 MAX_LIMIT = 1000
 
@@ -111,15 +112,7 @@ def _decode_bytes(raw: Any) -> str:
             data = zstd.ZstdDecompressor().decompressobj().decompress(data)
         except Exception:
             return ""
-    for encoding in ("utf-8", "utf-16-le", "gb18030"):
-        try:
-            text = data.decode(encoding)
-            break
-        except UnicodeDecodeError:
-            continue
-    else:
-        return ""
-    return text.replace("\x00", "").strip()
+    return decode_text(data).replace("\x00", "").strip()
 
 
 def _xml_root(text: str) -> ET.Element | None:
@@ -128,15 +121,9 @@ def _xml_root(text: str) -> ET.Element | None:
     start = text.find("<")
     if start < 0:
         return None
-    body = text[start:start + MAX_XML_BYTES]
-    try:
-        root = ET.fromstring(body)
-    except ET.ParseError:
-        body = re.sub(r"&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)", "&amp;", body)
-        try:
-            root = ET.fromstring(body)
-        except ET.ParseError:
-            return None
+    root = parse_xml(text[start:start + MAX_XML_BYTES])
+    if root is None:
+        return None
     if sum(1 for _ in root.iter()) > MAX_XML_NODES:
         return None
     return root
@@ -150,8 +137,10 @@ def _node_text(root: ET.Element | None, path: str) -> str:
             node = root.find(candidate)
         except SyntaxError:
             return ""
-        if node is not None and node.text:
-            return node.text.strip()
+        if node is not None:
+            text = "".join(node.itertext()) if len(node) else (node.text or "")
+            if text.strip():
+                return text.strip()
     return ""
 
 
@@ -182,7 +171,7 @@ def _strip_markup(value: str) -> str:
     if "<" in text:
         text = re.sub(r"(?is)<br\s*/?>", "\n", text)
         text = re.sub(r"(?is)</(?:p|div|li)>", "\n", text)
-        text = re.sub(r"(?is)<[^>]{0,400}>", "", text)
+        text = re.sub(r"(?is)<[A-Za-z/!?][^<>]{0,400}>", "", text)
     text = _html.unescape(text)
     return re.sub(r"[ \t\u00a0]{2,}", " ", text).strip()
 
@@ -427,6 +416,29 @@ def system_text(root: ET.Element | None, content: str, sender: str = "") -> str:
 
 def _join(*values: str, sep: str = " · ") -> str:
     return sep.join(item for item in values if item)
+
+
+_CALL_WORDINGS = {
+    "canceled": "已取消",
+    "cancelled": "已取消",
+    "call canceled by caller": "主叫已取消",
+    "already answered elsewhere": "已在其它设备接听",
+    "declined on other device": "已在其它设备拒接",
+    "call declined": "已拒绝",
+    "call not answered": "未接听",
+    "call wasn't answered": "未接听",
+    "line busy": "忙线未接听",
+    "line busy. call not received.": "忙线未接听",
+}
+
+
+def _call_text(detail: str) -> str:
+    text = str(detail or "").strip()
+    if not text:
+        return ""
+    if text.lower().startswith("duration:"):
+        return f"通话时长 {text.split(':', 1)[1].strip()}"
+    return _CALL_WORDINGS.get(text.lower(), text)
 
 
 def normalize_type(raw: Any) -> tuple[int, int]:
@@ -965,8 +977,12 @@ class ChatStore:
         if base in (37, 42):
             message["kind"] = "card"
             root = _xml_root(content)
-            nickname = _attr(root, "msg", "nickname")
-            username = _node_text(root, "msg/username") or _attr(root, "msg", "username")
+            nickname = str(root.get("nickname") or "").strip() if root is not None else ""
+            username = str(root.get("username") or "").strip() if root is not None else ""
+            if not nickname:
+                nickname = _node_text(root, "msg/nickname") or _node_text(root, "appmsg/title")
+            if not username:
+                username = _node_text(root, "msg/username")
             message["text"] = nickname
             message["title"] = nickname
             extra.update({"nickname": nickname, "username": username})
@@ -986,7 +1002,9 @@ class ChatStore:
             return
         if base == 50:
             message["kind"] = "call"
-            message["text"] = ""
+            root = _xml_root(content)
+            detail = _node_text(root, "msg") or _node_text(root, "voiplocalinfo/diaplay_content")
+            message["text"] = _call_text(detail)
             return
         if base == 51:
             message["kind"] = "system"

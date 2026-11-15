@@ -14,6 +14,8 @@ from typing import Any, Optional
 
 
 from .account_helpers import _load_contact_rows, _pick_display_name, _resolve_account_dir
+from .text_decoding import decode_text
+from .wechat_xml import looks_like_xml, parse_xml
 from .media_decrypt import _read_and_maybe_decrypt_media
 from .media_cache import _resolve_account_wxid_dir
 from ..exceptions import WxMomentsError
@@ -54,11 +56,7 @@ _SNS_VIDEO_KEY_RE = re.compile(r'<enc\s+key="(\d+)"', flags=re.IGNORECASE)
 _MP_BIZ_RE = re.compile(r"__biz=([A-Za-z0-9_=+-]+)")
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 _SNS_APP_NAME_RE = re.compile(r"<appname[^>]*>([\s\S]*?)</appname>", flags=re.IGNORECASE)
-_SNS_XML_CDATA_BLOCK_RE = re.compile(r"<!\[CDATA\[[\s\S]*?\]\]>", flags=re.IGNORECASE)
-_SNS_XML_BARE_AMP_RE = re.compile(r"&(?!(?:[a-zA-Z]+|#\d+|#x[0-9a-fA-F]+);)")
-_SNS_XML_INVALID_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
-_SNS_REALTIME_SYNC_STATE_FILE = "_sns_realtime_sync_state.json"
 _SNS_DECRYPTED_DB_LOCKS: dict[str, threading.Lock] = {}
 _SNS_DECRYPTED_DB_LOCKS_MU = threading.Lock()
 
@@ -131,49 +129,6 @@ def _safe_int(v: Any) -> int:
         return 0
 
 
-def _count_sns_timeline_rows_in_decrypted_sqlite(
-    sns_db_path: Path,
-    *,
-    users: list[str],
-    kw: str,
-) -> int:
-    sns_db_path = Path(sns_db_path)
-    try:
-        if (not sns_db_path.exists()) or (not sns_db_path.is_file()):
-            return 0
-    except Exception:
-        return 0
-
-    filters: list[str] = []
-    params: list[Any] = []
-
-    if users:
-        placeholders = ",".join(["?"] * len(users))
-        filters.append(f"user_name IN ({placeholders})")
-        params.extend(users)
-
-    if kw:
-        filters.append("content LIKE ?")
-        params.append(f"%{kw}%")
-
-    where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
-    sql = f"SELECT COUNT(*) AS c FROM SnsTimeLine {where_sql}"
-
-    try:
-        conn = sqlite3.connect(str(sns_db_path), timeout=2.0)
-        try:
-            conn.execute("PRAGMA busy_timeout=2000")
-            row = conn.execute(sql, params).fetchone()
-            return int((row[0] if row else 0) or 0)
-        finally:
-            try:
-                conn.close()
-            except Exception as exc:
-                logger.warning("%s: %s", type(exc).__name__, exc)
-    except Exception:
-        return 0
-
-
 def _count_sns_timeline_posts_in_decrypted_sqlite(
     sns_db_path: Path,
     *,
@@ -235,30 +190,6 @@ def _to_unsigned_i64_str(v: Any) -> str:
     except Exception:
         return str(v or "").strip()
     return str(x & 0xFFFFFFFFFFFFFFFF)
-
-
-def _read_sns_realtime_sync_state(account_dir: Path) -> dict[str, Any]:
-    p = Path(account_dir) / _SNS_REALTIME_SYNC_STATE_FILE
-    try:
-        if not p.exists() or (not p.is_file()):
-            return {}
-    except Exception:
-        return {}
-
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-    return data if isinstance(data, dict) else {}
-
-
-def _write_sns_realtime_sync_state(account_dir: Path, data: dict[str, Any]) -> None:
-    p = Path(account_dir) / _SNS_REALTIME_SYNC_STATE_FILE
-    try:
-        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as exc:
-        logger.warning("%s: %s", type(exc).__name__, exc)
 
 
 def _ensure_decrypted_sns_db(account_dir: Path) -> Path:
@@ -444,71 +375,19 @@ def _extract_sns_video_key(raw_xml: Any) -> str:
     return str(m.group(1) or "").strip() if m else ""
 
 
-def _looks_like_xml_text(s: str) -> bool:
-    if not s:
-        return False
-    t = str(s).lstrip()
-    if t.startswith('"') and t.endswith('"'):
-        t = t.strip('"').lstrip()
-    return t.startswith("<")
-
-
-def _sanitize_wechat_xml_for_et(xml_text: str) -> str:
-    s = str(xml_text or "")
-    if not s:
-        return ""
-
-    s = _SNS_XML_INVALID_CHARS_RE.sub("", s)
-
-    parts: list[str] = []
-    last = 0
-    for m in _SNS_XML_CDATA_BLOCK_RE.finditer(s):
-        head = s[last : m.start()]
-        if head:
-            parts.append(_SNS_XML_BARE_AMP_RE.sub("&amp;", head))
-        parts.append(m.group(0))
-        last = m.end()
-
-    tail = s[last:]
-    if tail:
-        parts.append(_SNS_XML_BARE_AMP_RE.sub("&amp;", tail))
-
-    return "".join(parts)
-
-
 def _decode_sns_text_blob(value: Any) -> str:
     if value is None:
         return ""
 
-    if isinstance(value, memoryview):
+    if isinstance(value, (memoryview, bytes, bytearray)):
         raw = bytes(value)
         if raw and zstd is not None and raw.startswith(_ZSTD_MAGIC):
             try:
                 raw = zstd.decompress(raw)
             except Exception as exc:
                 logger.warning("%s: %s", type(exc).__name__, exc)
-        try:
-            s = raw.decode("utf-8", errors="ignore")
-        except Exception as exc:
-            logger.warning("%s: %s", type(exc).__name__, exc)
-            s = ""
-        s = html.unescape(str(s or "").strip())
-        return s if _looks_like_xml_text(s) else (str(s or "").strip())
-
-    if isinstance(value, (bytes, bytearray)):
-        raw = bytes(value)
-        if raw and zstd is not None and raw.startswith(_ZSTD_MAGIC):
-            try:
-                raw = zstd.decompress(raw)
-            except Exception as exc:
-                logger.warning("%s: %s", type(exc).__name__, exc)
-        try:
-            s = raw.decode("utf-8", errors="ignore")
-        except Exception as exc:
-            logger.warning("%s: %s", type(exc).__name__, exc)
-            s = ""
-        s = html.unescape(str(s or "").strip())
-        return s if _looks_like_xml_text(s) else (str(s or "").strip())
+        s = html.unescape(str(decode_text(raw) or "").strip())
+        return s if looks_like_xml(s) else (str(s or "").strip())
 
     try:
         text = str(value or "")
@@ -519,12 +398,12 @@ def _decode_sns_text_blob(value: Any) -> str:
     if not text:
         return ""
 
-    if _looks_like_xml_text(text):
+    if looks_like_xml(text):
         return text
 
     def _accept_xml(decoded: str) -> str:
         s2 = html.unescape(str(decoded or "").strip())
-        return s2 if _looks_like_xml_text(s2) else ""
+        return s2 if looks_like_xml(s2) else ""
 
     t_hex = text[2:] if text.lower().startswith("0x") else text
     if len(t_hex) >= 16 and len(t_hex) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", t_hex):
@@ -536,7 +415,7 @@ def _decode_sns_text_blob(value: Any) -> str:
                 except Exception:
                     raw = b""
             if raw:
-                s2 = _accept_xml(raw.decode("utf-8", errors="ignore"))
+                s2 = _accept_xml(decode_text(raw))
                 if s2:
                     return s2
         except Exception as exc:
@@ -551,7 +430,7 @@ def _decode_sns_text_blob(value: Any) -> str:
                 except Exception:
                     raw = b""
             if raw:
-                s2 = _accept_xml(raw.decode("utf-8", errors="ignore"))
+                s2 = _accept_xml(decode_text(raw))
                 if s2:
                     return s2
         except Exception as exc:
@@ -627,9 +506,8 @@ def _parse_timeline_xml(xml_text: str, fallback_username: str) -> dict[str, Any]
         return out
 
 
-    try:
-        root = ET.fromstring(_sanitize_wechat_xml_for_et(xml_str))
-    except Exception:
+    root = parse_xml(xml_str)
+    if root is None:
         return out
 
     try:
@@ -661,12 +539,16 @@ def _parse_timeline_xml(xml_text: str, fallback_username: str) -> dict[str, Any]
     def _find_text(*paths: str) -> str:
         for p in paths:
             try:
-                v = root.findtext(p)
+                node = root.find(p)
             except Exception:
-                v = None
-            if isinstance(v, str) and v.strip():
-                return v.strip()
+                node = None
+            if node is None:
+                continue
+            value = "".join(node.itertext()) if len(node) else (node.text or "")
+            if value.strip():
+                return value.strip()
         return ""
+
     def _clean_url(u: str) -> str:
         if not u:
             return ""
@@ -1094,14 +976,6 @@ def _normalize_hex32(value: Optional[str]) -> str:
     return s[:32]
 
 
-def _sns_cache_key_from_path(p: Path) -> str:
-    try:
-        key = f"{p.parent.name}{p.name}"
-    except Exception:
-        return ""
-    return _normalize_hex32(key)
-
-
 def _generate_sns_cache_key(tid: str, media_id: str, media_type: int = MEDIA_TYPE_IMAGE) -> str:
     if not tid or not media_id:
         return ""
@@ -1124,37 +998,6 @@ def _resolve_sns_cached_image_path_by_cache_key(
 
     sub = key32[:2]
     rest = key32[2:]
-    roots = _sns_img_roots(str(wxid_dir))
-    if not roots:
-        return None
-
-    best: tuple[float, str] | None = None
-    for root_str in roots:
-        try:
-            p = Path(root_str) / sub / rest
-            if not (p.exists() and p.is_file()):
-                continue
-            st = p.stat()
-            score = abs(float(st.st_mtime) - float(create_time)) if create_time > 0 else -float(st.st_mtime)
-            if best is None or score < best[0]:
-                best = (score, str(p))
-        except Exception:
-            continue
-    return best[1] if best else None
-
-
-def _resolve_sns_cached_image_path_by_md5(
-    *,
-    wxid_dir: Path,
-    md5: str,
-    create_time: int,
-) -> Optional[str]:
-    md5_32 = _normalize_hex32(md5)
-    if not md5_32:
-        return None
-
-    sub = md5_32[:2]
-    rest = md5_32[2:]
     roots = _sns_img_roots(str(wxid_dir))
     if not roots:
         return None
@@ -1256,36 +1099,6 @@ def _resolve_sns_cached_image_path(
     return None
 
 
-def _resolve_sns_cached_video_path(
-    wxid_dir: Path,
-    post_id: str,
-    media_id: str
-) -> Optional[str]:
-    if not post_id or not media_id:
-        return None
-
-    raw_key = f"{post_id}_{media_id}_3"
-    try:
-        key32 = hashlib.md5(raw_key.encode("utf-8")).hexdigest()
-    except Exception:
-        return None
-
-    sub = key32[:2]
-    rest = key32[2:]
-
-    roots = _sns_video_roots(str(wxid_dir))
-    for root_str in roots:
-        try:
-            base_path = Path(root_str) / sub / rest
-            for ext in [".mp4", ".tmp"]:
-                p = base_path.with_suffix(ext)
-                if p.exists() and p.is_file():
-                    return str(p)
-        except Exception:
-            continue
-
-    return None
-
 def _get_sns_covers(
     account_dir: Path,
     target_wxid: str,
@@ -1374,11 +1187,6 @@ def _get_sns_covers(
             }
         )
     return out
-
-
-def _get_sns_cover(account_dir: Path, target_wxid: str) -> Optional[dict[str, Any]]:
-    covers = _get_sns_covers(account_dir, target_wxid, limit=1)
-    return covers[0] if covers else None
 
 
 def _build_timeline_item(
@@ -1869,6 +1677,9 @@ def _query_wcdb_realtime_timeline(
             xml = content_by_tid.get(int(tid_s))
             if xml:
                 parsed = _parse_timeline_xml(xml, uname)
+                parsed_desc = str(parsed.get("contentDesc") or "").strip()
+                if parsed_desc:
+                    content_desc = parsed_desc
                 if parsed.get("location"):
                     location = str(parsed.get("location") or "")
                 sn0 = str(parsed.get("sourceName") or "").strip()

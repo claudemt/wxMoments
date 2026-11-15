@@ -20,7 +20,8 @@ import wxmoments
 from author_watch import AuthorWatch
 from web_runtime import Job, diagnostics, start_job
 from wechat_download import harvest, wechat, wxprofile
-from wechat_decrypt_tool.modules import chat_reader, wechat_decrypt
+from wechat_decrypt_tool.modules import chat_reader, sns_reader, wechat_decrypt, wechat_xml
+from wechat_decrypt_tool.modules.text_decoding import decode_text
 
 
 def post(day, username="friend"):
@@ -890,6 +891,142 @@ class ChatListExportTests(unittest.TestCase):
         self.assertNotIn("wechat_id", server.CHATLIST_GROUP_COLUMNS)
         self.assertIn("pinned", server.CHATLIST_CONTACT_COLUMNS)
         self.assertIn("pinned", server.CHATLIST_GROUP_COLUMNS)
+
+
+class TextDecodeTests(unittest.TestCase):
+    def test_utf8_traditional_text_is_kept(self):
+        text = "繁體字測試：說話、時間、臺灣"
+        self.assertEqual(decode_text(text.encode("utf-8")), text)
+
+    def test_big5_text_is_not_dropped(self):
+        text = "這是繁體字測試，謝謝！我們明天見"
+        self.assertEqual(decode_text(text.encode("big5")), text)
+
+    def test_big5_hkscs_text_is_not_dropped(self):
+        text = "香港朋友嘅問候，咁樣好開心"
+        self.assertEqual(decode_text(text.encode("big5hkscs")), text)
+
+    def test_gb18030_text_is_not_dropped(self):
+        text = "简体中文：我们说话时间到了"
+        self.assertEqual(decode_text(text.encode("gb18030")), text)
+
+    def test_utf16_text_is_not_dropped(self):
+        text = "繁體測試：說話時間"
+        self.assertEqual(decode_text(text.encode("utf-16-le")), text)
+
+    def test_truncated_utf8_tail_keeps_prefix(self):
+        raw = ("繁體中文测试" * 20).encode("utf-8")[:-1]
+        self.assertIn("繁體中文测试", decode_text(raw))
+
+    def test_sns_blob_decodes_traditional_bytes(self):
+        text = "繁體字測試：這個時間會發財"
+        self.assertEqual(sns_reader._decode_sns_text_blob(text.encode("big5")), text)
+
+    def test_chat_reader_decodes_traditional_bytes(self):
+        text = "我們明天見"
+        self.assertEqual(chat_reader._decode_bytes(text.encode("big5")), text)
+
+    def test_stray_markup_in_content_desc_keeps_full_text(self):
+        content = "输入 <思维> 标签后内容会丢失"
+        xml = (f"<TimelineObject><createTime>1700000000</createTime>"
+               f"<contentDesc>{content}</contentDesc><type>1</type></TimelineObject>")
+        parsed = sns_reader._parse_timeline_xml(xml, "friend")
+        self.assertEqual(parsed["contentDesc"], content)
+
+    def test_traditional_text_with_markup_survives_parse(self):
+        content = "測試內容：<(⊙0⊙)> 表情符號"
+        xml = (f"<TimelineObject><createTime>1700000000</createTime>"
+               f"<contentDesc>{content}</contentDesc><type>1</type></TimelineObject>")
+        parsed = sns_reader._parse_timeline_xml(xml, "friend")
+        self.assertEqual(parsed["contentDesc"], content)
+
+    def test_big5_moments_post_survives_pipeline(self):
+        content = "這是繁體字測試，謝謝！"
+        xml = (f"<TimelineObject><createTime>1700000000</createTime>"
+               f"<contentDesc>{content}</contentDesc><type>1</type></TimelineObject>")
+        parsed = sns_reader._parse_timeline_xml(xml.encode("big5"), "friend")
+        self.assertEqual(parsed["contentDesc"], content)
+
+
+class WechatXmlRepairTests(unittest.TestCase):
+    def test_stray_angle_brackets_in_chat_title_are_kept(self):
+        xml = "<msg><appmsg><title>看这个<(⊙0⊙)>表情</title></appmsg></msg>"
+        self.assertEqual(chat_reader._clean_fragment(xml), "看这个<(⊙0⊙)>表情")
+
+    def test_less_than_sign_in_chat_title_is_kept(self):
+        xml = "<msg><appmsg><title>3<5 才对</title></appmsg></msg>"
+        self.assertEqual(chat_reader._clean_fragment(xml), "3<5 才对")
+
+    def test_strip_markup_keeps_plain_less_than_sign(self):
+        self.assertEqual(chat_reader._strip_markup("<3 爱你"), "<3 爱你")
+
+    def test_strip_markup_still_removes_real_tags(self):
+        self.assertEqual(chat_reader._strip_markup("<b>粗体</b>正文"), "粗体正文")
+
+    def test_nested_tag_text_is_not_lost(self):
+        xml = ("<msg><appmsg><title>分享 <第3章> 与 <b>重点</b></title>"
+               "</appmsg></msg>")
+        self.assertIn("重点", chat_reader._clean_fragment(xml))
+        self.assertIn("<第3章>", chat_reader._clean_fragment(xml))
+
+    def test_cdata_block_is_not_rewritten(self):
+        xml = "<msg><title><![CDATA[测试 <未转义> & 符号]]></title></msg>"
+        root = wechat_xml.parse_xml(xml)
+        self.assertIsNotNone(root)
+        self.assertEqual("".join(root.itertext()), "测试 <未转义> & 符号")
+
+    def test_bare_ampersand_in_url_is_recovered(self):
+        root = wechat_xml.parse_xml("<msg><url>https://a.com/?a=1&b=2</url></msg>")
+        self.assertIsNotNone(root)
+        self.assertEqual("".join(root.itertext()), "https://a.com/?a=1&b=2")
+
+    def test_sns_title_with_angle_brackets_keeps_text(self):
+        content = "曲目：<Track One> 与 <Track Two>"
+        xml = (f"<TimelineObject><createTime>1700000000</createTime>"
+               f"<contentDesc>{content}</contentDesc><type>1</type></TimelineObject>")
+        self.assertEqual(sns_reader._parse_timeline_xml(xml, "friend")["contentDesc"], content)
+
+    def test_chat_message_with_controls_is_sanitized(self):
+        xml = "<msg><appmsg><title>正常\x01文本</title></appmsg></msg>"
+        self.assertEqual(chat_reader._clean_fragment(xml), "正常文本")
+
+    def test_multi_root_fragment_keeps_every_node(self):
+        xml = ("<voipinvitemsg><status>0</status></voipinvitemsg>"
+               "<voiplocalinfo><diaplay_content>Duration: 00:21</diaplay_content></voiplocalinfo>")
+        root = wechat_xml.parse_xml(xml)
+        self.assertIsNotNone(root)
+        node = root.find(".//diaplay_content")
+        self.assertIsNotNone(node)
+        self.assertEqual(node.text, "Duration: 00:21")
+
+    def test_single_root_fragment_is_unwrapped(self):
+        root = wechat_xml.parse_xml("<msg><title>标题</title></msg>")
+        self.assertEqual(root.tag, "msg")
+
+    def test_call_wording_is_localised(self):
+        self.assertEqual(chat_reader._call_text("Duration: 00:21"), "通话时长 00:21")
+        self.assertEqual(chat_reader._call_text("Canceled"), "已取消")
+        self.assertEqual(chat_reader._call_text("对方已拒绝"), "对方已拒绝")
+        self.assertEqual(chat_reader._call_text(""), "")
+
+
+class FolderNameTests(unittest.TestCase):
+    def test_traditional_name_is_kept(self):
+        self.assertEqual(wxmoments.sanitize_folder_name("臺灣朋友群"), "臺灣朋友群")
+
+    def test_windows_reserved_name_is_prefixed(self):
+        for name in ("CON", "nul", "COM1", "LPT9"):
+            self.assertTrue(wxmoments.sanitize_folder_name(name).startswith("_"))
+
+    def test_long_name_is_clipped_and_still_unique(self):
+        first = wxmoments.sanitize_folder_name("群" * 200)
+        second = wxmoments.sanitize_folder_name("群" * 200 + "甲")
+        self.assertLessEqual(len(first), 60)
+        self.assertLessEqual(len(second), 60)
+        self.assertNotEqual(first, second)
+
+    def test_blank_name_falls_back(self):
+        self.assertEqual(wxmoments.sanitize_folder_name("   "), "分组")
 
 
 if __name__ == "__main__":

@@ -37,10 +37,6 @@ class UiaUnavailable(RuntimeError):
         self.detail = detail
 
 
-class LabelSyncBusy(RuntimeError):
-    pass
-
-
 class Desktop(Protocol):
 
     def find_window(self, title: str, class_hint: str = "") -> Any | None: ...

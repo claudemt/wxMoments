@@ -24,13 +24,6 @@ DROP_KEYWORDS = (
 )
 
 
-INLINE_TAGS = {
-    "a", "span", "strong", "b", "em", "i", "u", "code", "br", "img", "sub",
-    "sup", "small", "label", "font", "mark", "del", "s", "abbr", "time",
-    "big", "tt", "strike", "q", "cite", "dfn", "kbd", "samp", "var", "wbr",
-}
-
-
 BLOCK_TAGS = {
     "p", "div", "section", "article", "header", "footer", "h1", "h2", "h3",
     "h4", "h5", "h6", "blockquote", "ul", "ol", "li", "pre", "table",
@@ -123,9 +116,6 @@ def clean_content(node: Tag) -> str:
             break
 
     return node.decode_contents()
-
-
-
 
 
 _WS_RE = re.compile(r"[\s ​‌‍﻿]+")
@@ -304,9 +294,6 @@ def _tidy(md: str) -> str:
     out = "\n".join(lines)
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip() + "\n"
-
-
-
 
 
 HTML_TEMPLATE = """<!DOCTYPE html>

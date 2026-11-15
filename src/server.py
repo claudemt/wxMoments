@@ -53,7 +53,7 @@ async def lifespan(app):
 
 app = FastAPI(title="微信数据导出工具", lifespan=lifespan)
 
-WEB_BUILD = "2026-11-07.7"
+WEB_BUILD = "2026-11-07.8"
 
 
 _ARTICLE_CACHE: dict[str, wechat.Article] = {}

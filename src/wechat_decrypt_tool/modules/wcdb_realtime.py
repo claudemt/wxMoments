@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from .text_decoding import decode_text
 from .key_store import get_account_keys_from_store
 from .logging_config import get_logger
 from .media_cache import _resolve_account_db_storage_dir
@@ -118,8 +119,6 @@ _protection_result: Optional[tuple[int, str]] = None
 
 def _is_windows() -> bool:
     return sys.platform.startswith("win")
-
-
 
 
 def _is_supported_native_platform() -> bool:
@@ -414,7 +413,7 @@ def _call_out_json(fn, *args) -> str:
             hint = f" logs={logs[:_MAX_LOG_ENTRIES]}" if logs else ""
             raise WCDBRealtimeError(f"wcdb api call failed: {rc}.{hint}")
         raw = out.value or b""
-        return raw.decode("utf-8", errors="replace")
+        return decode_text(raw)
     finally:
         try:
             if out.value:
@@ -435,7 +434,7 @@ def get_native_logs(*, require_initialized: bool = True) -> list[str]:
     try:
         if rc != 0 or not out.value:
             return []
-        decoded = _safe_load_json(out.value.decode("utf-8", errors="replace"))
+        decoded = _safe_load_json(decode_text(out.value))
         if isinstance(decoded, list):
             return [str(x) for x in decoded]
         return []
@@ -534,21 +533,6 @@ def close_account(handle: int) -> None:
         return
 
 
-def get_display_names(handle: int, usernames: list[str]) -> dict[str, str]:
-    _ensure_initialized()
-    uniq = list(dict.fromkeys(str(item or "").strip() for item in usernames if str(item or "").strip()))
-    if not uniq:
-        return {}
-
-    lib = _load_wcdb_lib()
-    payload = json.dumps(uniq, ensure_ascii=False).encode("utf-8")
-    out_json = _call_out_json(lib.wcdb_get_display_names, ctypes.c_int64(int(handle)), payload)
-    decoded = _safe_load_json(out_json)
-    if isinstance(decoded, dict):
-        return {str(key): str(value) for key, value in decoded.items()}
-    return {}
-
-
 def exec_query(handle: int, *, kind: str, path: Optional[str], sql: str) -> list[dict[str, Any]]:
     _ensure_initialized()
     kind_text = str(kind or "").strip()
@@ -611,18 +595,6 @@ def get_sns_timeline(
     if isinstance(decoded, list):
         return [item for item in decoded if isinstance(item, dict)]
     return []
-
-
-def shutdown() -> None:
-    global _initialized
-    lib = _load_wcdb_lib()
-    with _lib_lock:
-        if not _initialized:
-            return
-        try:
-            lib.wcdb_shutdown()
-        finally:
-            _initialized = False
 
 
 def _resolve_session_db_path(db_storage_dir: Path) -> Path:

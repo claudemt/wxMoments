@@ -27,7 +27,6 @@ MEM_COMMIT = 0x1000
 MEM_PRIVATE = 0x20000
 
 IV_SIZE = 16
-HMAC_SHA256_SIZE = 64
 HMAC_SHA512_SIZE = 64
 KEY_SIZE = 32
 AES_BLOCK_SIZE = 16
@@ -110,10 +109,8 @@ class MEMORY_BASIC_INFORMATION(ctypes.Structure):
     ]
 
 
-
 def open_process(pid):
     return ctypes.windll.kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
-
 
 
 def read_process_memory(process_handle, address, size):
@@ -129,7 +126,6 @@ def read_process_memory(process_handle, address, size):
     if not success:
         return None
     return buffer.raw
-
 
 
 def get_memory_regions(process_handle):

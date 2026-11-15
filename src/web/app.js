@@ -96,6 +96,12 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
+function clipText(s, limit, suffix = "…") {
+  const chars = Array.from(String(s == null ? "" : s));
+  if (chars.length <= limit) return chars.join("");
+  return chars.slice(0, limit).join("") + suffix;
+}
+
 let askResolve = null;
 function askConfirm({ title = "确认删除？", message = "", okText = "确认",
   cancelText = "取消", danger = true } = {}) {
@@ -1562,7 +1568,7 @@ function renderChatListTable() {
         td.title = full;
       } else if (col === "announcement" && full) {
         const one = full.replace(/\s+/g, " ");
-        td.textContent = one.length > 40 ? `${one.slice(0, 40)}…` : one;
+        td.textContent = clipText(one, 40);
         td.title = full;
       } else {
         td.textContent = full;
